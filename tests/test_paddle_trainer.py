@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,7 @@ def run_trainer(config, logdir, *options):
     result = subprocess.run(
         [sys.executable, str(ROOT / 'geodiff_paddle/train.py'), str(config),
          '--logdir', str(logdir), '--val_batches', '1', '--record_inputs', *options],
-        cwd=ROOT / 'geodiff_paddle', capture_output=True, text=True, timeout=120,
+        cwd=ROOT, capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     run, = logdir.iterdir()
@@ -52,16 +53,26 @@ def test_qm9_native_checkpoint_resumes_both_adam_updates(tmp_path):
         pytest.skip('Set GEODIFF_QM9_SMOKE_ASSETS to the exported official smoke assets')
     assets = Path(asset_dir).resolve()
     weights_path = assets / 'qm9_default.npz'
+    config = yaml.safe_load((ROOT / 'geodiff_paddle/configs/qm9_default.yml').read_text())
+    config['dataset'].update(
+        train=os.path.relpath(assets / 'train_2.npz', ROOT),
+        val=os.path.relpath(assets / 'val_2.npz', ROOT),
+    )
+    config['train']['batch_size'] = 2
+    smoke_config = tmp_path / 'qm9_smoke.yml'
+    smoke_config.write_text(yaml.safe_dump(config))
 
-    first_run = run_trainer(assets / 'qm9_smoke.yml', tmp_path / 'first',
-                            '--weights', str(weights_path))
-    resumed_run = run_trainer(first_run, tmp_path / 'resume', '--max_iters', '2')
+    first_run = run_trainer(smoke_config, tmp_path / 'first',
+                            '--weights', str(weights_path), '--max_iters', '1')
+    resumed_run = run_trainer(first_run, tmp_path / 'resume',
+                              '--resume_iter', '1', '--max_iters', '2')
     first_metrics, resume_metrics = read_metrics(first_run, 1), read_metrics(resumed_run, 2)
 
     import paddle
 
     first = paddle.load(str(first_run / 'checkpoints/1.pdckpt'))
     resumed = paddle.load(str(resumed_run / 'checkpoints/2.pdckpt'))
+    assert {path.name for path in (first_run / 'checkpoints').iterdir()} == {'1.pdckpt'}
     assert {path.name for path in (resumed_run / 'checkpoints').iterdir()} == {'2.pdckpt'}
     for iteration, state, metrics in ((1, first, first_metrics), (2, resumed, resume_metrics)):
         assert {'model', 'config', 'iteration', 'avg_val_loss',

@@ -11,16 +11,31 @@ This directory ports [GeoDiff](https://github.com/MinkaiXu/GeoDiff) (ICLR 2022) 
 Use Python 3.10 and Paddle 3.4.0. For the Linux x86-64 CUDA 13 build used in the QM9 checks:
 
 ```bash
-conda env create -f geodiff_paddle/env.yml
-conda activate geodiff-paddle
-python -m pip install https://paddle-whl.cdn.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0-cp310-cp310-linux_x86_64.whl
+uv venv --python 3.10 .venv
+source .venv/bin/activate
+uv pip install 'setuptools==80.10.1' 'numpy==1.26.4' 'rdkit==2024.9.1' pyyaml easydict networkx tqdm
+uv pip install https://paddle-whl.cdn.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0-cp310-cp310-linux_x86_64.whl
 ```
 
-Install `pandas` for the COV/MAT report, `psikit` and its Psi4 backend for property evaluation, `py3Dmol` for interactive visualization, or `pytest` for the entry tests. These are not needed for QM9 training. Do not install Torch or PyG in the Paddle environment.
+Do not install Torch or PyG in the Paddle environment. Install `pandas` for the COV/MAT report, `psikit` and its Psi4 backend for property evaluation, or `py3Dmol` for interactive visualization. These are not needed for QM9 training. On WSL, add `/usr/lib/wsl/lib` to `LD_LIBRARY_PATH` if the CUDA driver is not found.
 
 ## Export trusted QM9 assets offline
 
-Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. Run these commands in the separate Torch reference environment (PyG 1.7.2 with Torch-compatible torch-scatter, torch-sparse and torch-cluster builds):
+Use a separate Python 3.10 environment for the trusted Torch exports. The reference ran with Torch 2.11.0+cu128, torchvision 0.26.0+cu128, PyG 1.7.2, and the matching Linux x86-64 PyG extension wheels. Use the pinned binaries, not same-version source builds: CUDA radius neighbor selection differs between the `torch-cluster` wheel and source tag.
+
+```bash
+deactivate  # if the Paddle environment is active
+uv venv --python 3.10 .venv-torch
+source .venv-torch/bin/activate
+uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+  'torch==2.11.0+cu128' 'torchvision==0.26.0+cu128'
+uv pip install 'setuptools==80.10.1' 'numpy==1.26.4' 'rdkit==2024.9.1' \
+  'torch-geometric==1.7.2' 'googledrivedownloader==1.1.0' pyyaml easydict
+uv pip install --no-index --no-deps --find-links 'https://data.pyg.org/whl/torch-2.11.0%2Bcu128.html' \
+  'torch-scatter==2.1.2+pt211cu128' 'torch-sparse==0.6.18+pt211cu128' 'torch-cluster==1.6.3+pt211cu128'
+```
+
+Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. Run the following commands from the repository root in the Torch environment:
 
 ```bash
 python tools/export_paddle_assets.py weights checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.npz
@@ -32,12 +47,23 @@ The exporter reads trusted files only, runs on CPU, and leaves the originals unc
 
 ## Compare fixed QM9 forward outputs
 
-Return to the Paddle environment. Use the saved Torch fixed-input reference (`runs/torch_qm9_smoke/forward.npz`) and first official validation graph reference (`runs/paddle_qm9/qm9_val_first_graph_ref.npz`):
+To recreate both references after cleaning `runs/`, run this command in the Torch environment on CUDA:
+
+```bash
+python tools/export_qm9_references.py \
+  --checkpoint checkpoints/qm9_default.pt --val data/QM9/val_data_5k.pkl \
+  --forward runs/paddle_qm9/recreated/forward.npz \
+  --val-graph runs/paddle_qm9/recreated/val_first_graph.npz
+```
+
+The tool loads the checkpoint on CPU, then runs the original model on CUDA with the fixed seed-2021 NumPy inputs. It uses the original model's graph expansion on the first official validation graph. It writes only new files. The recreated forward archive is a new execution, not the historical `runs/torch_qm9_smoke/forward.npz`; keep the historical file unchanged if you have it.
+
+Return to the Paddle environment and check the archives:
 
 ```bash
 PYTHONPATH=geodiff_paddle python tools/check_paddle_forward.py \
-  --forward runs/torch_qm9_smoke/forward.npz \
-  --val-graph runs/paddle_qm9/qm9_val_first_graph_ref.npz \
+  --forward runs/paddle_qm9/recreated/forward.npz \
+  --val-graph runs/paddle_qm9/recreated/val_first_graph.npz \
   --weights runs/paddle_qm9/qm9_default.npz \
   --train runs/paddle_qm9/train_2.npz --device gpu:0
 ```
@@ -69,6 +95,10 @@ python geodiff_paddle/train.py "$run" \
 ```
 
 The fresh run starts with released model weights and two new Adam optimizers; the resume run restores model and optimizer state from the trusted native `checkpoints/1.pdckpt`. This checks one update and native resume, not historical Torch training.
+
+## Run the tests
+
+In the Paddle environment, install `pytest` with `uv pip install pytest` and run `pytest` from the repository root. The portable reader test needs no Torch or official assets. Set `GEODIFF_TORCH_PYTHON` to the Torch environment's Python executable to include the exporter round-trip. Set `GEODIFF_QM9_SMOKE_ASSETS` to `runs/paddle_qm9` to include the bounded CUDA training and native resume test on the exported two-graph splits.
 
 ## Optional sampling and evaluation
 
