@@ -1,6 +1,6 @@
 # GeoDiff Paddle 镜像：QM9 首轮转换与验收
 
-Status: ready-for-agent
+Status: resolved
 
 ## 问题与目标
 
