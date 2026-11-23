@@ -4,7 +4,6 @@ import time
 import random
 import logging
 import numpy as np
-from glob import glob
 from graph_data import Batch
 
 
@@ -81,12 +80,3 @@ def repeat_batch(batch, num_repeat):
     return Batch.from_data_list([
         data.clone() for _ in range(num_repeat) for data in datas
     ])
-
-
-def get_checkpoint_path(folder, it=None):
-    if it is not None:
-        return os.path.join(folder, '%d.pt' % it), it
-    all_iters = list(map(lambda x: int(os.path.basename(x[:-3])), glob(os.
-        path.join(folder, '*.pt'))))
-    paddle.sort(x=all_iters), paddle.argsort(x=all_iters)
-    return os.path.join(folder, '%d.pt' % all_iters[-1]), all_iters[-1]

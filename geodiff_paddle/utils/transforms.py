@@ -1,10 +1,12 @@
-import paddle
 import copy
-from torch_geometric.data import Data
-from torch_geometric.transforms import Compose
-from torch_geometric.utils import to_dense_adj, dense_to_sparse
-from torch_sparse import coalesce
-from .chem import BOND_TYPES, BOND_NAMES, get_atom_symbol
+
+import paddle
+
+from graph_data import Data
+from graph_ops import to_dense_adj
+from models.common import higher_order_edges
+
+from .chem import BOND_NAMES, BOND_TYPES, get_atom_symbol
 
 
 class AddHigherOrderEdges(object):
@@ -14,44 +16,15 @@ class AddHigherOrderEdges(object):
         self.order = order
         self.num_types = num_types
 
-    def binarize(self, x):
-        return paddle.where(x > 0, paddle.ones_like(x), paddle.zeros_like(x))
-
-    def get_higher_order_adj_matrix(self, adj, order):
-        """
-        Args:
-            adj:        (N, N)
-            type_mat:   (N, N)
-        """
-        adj_mats = [paddle.eye(adj.size(0), dtype=paddle.long, device=adj.
-            device), self.binarize(adj + paddle.eye(adj.size(0), dtype=
-            paddle.long, device=adj.device))]
-        for i in range(2, order + 1):
-            adj_mats.append(self.binarize(adj_mats[i - 1] @ adj_mats[1]))
-        order_mat = paddle.zeros_like(adj)
-        for i in range(1, order + 1):
-            order_mat += (adj_mats[i] - adj_mats[i - 1]) * i
-        return order_mat
-
     def __call__(self, data: Data):
-        N = data.num_nodes
-        adj = to_dense_adj(data.edge_index).squeeze(0)
-        adj_order = self.get_higher_order_adj_matrix(adj, self.order)
-        type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type
-            ).squeeze(0)
-        type_highorder = paddle.where(adj_order > 1, self.num_types +
-            adj_order - 1, paddle.zeros_like(adj_order))
-        assert (type_mat * type_highorder == 0).all()
-        type_new = type_mat + type_highorder
-        new_edge_index, new_edge_type = dense_to_sparse(type_new)
-        _, edge_order = dense_to_sparse(adj_order)
         data.bond_edge_index = data.edge_index
-        data.edge_index, data.edge_type = coalesce(new_edge_index,
-            new_edge_type.long(), N, N)
-        edge_index_1, data.edge_order = coalesce(new_edge_index, edge_order
-            .long(), N, N)
-        data.is_bond = data.edge_type < self.num_types
-        assert (data.edge_index == edge_index_1).all()
+        data.edge_index, data.edge_type, data.edge_order = higher_order_edges(
+            data.num_nodes, data.edge_index, data.edge_type, self.order
+        )
+        data.is_bond = data.edge_order == 1
+        if self.num_types != len(BOND_TYPES):
+            data.edge_type = paddle.where(data.is_bond, data.edge_type,
+                                          self.num_types + data.edge_order - 1)
         return data
 
 
@@ -60,7 +33,7 @@ class AddEdgeLength(object):
     def __call__(self, data: Data):
         pos = data.pos
         row, col = data.edge_index
-        d = (pos[row] - pos[col]).norm(dim=-1).unsqueeze(-1)
+        d = paddle.linalg.norm(pos[row] - pos[col], axis=-1).unsqueeze(-1)
         data.edge_length = d
         return data
 
@@ -85,9 +58,9 @@ class AddEdgeName(object):
 
     def __call__(self, data: Data):
         data.edge_name = []
-        for i in range(data.edge_index.size(1)):
-            tail = data.edge_index[0, i]
-            head = data.edge_index[1, i]
+        for i in range(data.edge_index.shape[1]):
+            tail = data.edge_index[0, i].item()
+            head = data.edge_index[1, i].item()
             if self.asymmetric and tail >= head:
                 data.edge_name.append('')
                 continue
@@ -96,7 +69,7 @@ class AddEdgeName(object):
             name = '%s_%s_%s_%d_%d' % (self.bonds[data.edge_type[i].item()] if
                 data.edge_type[i].item() in self.bonds else 'E' + str(data.
                 edge_type[i].item()), tail_name, head_name, tail, head)
-            if hasattr(data, 'edge_length'):
+            if 'edge_length' in data:
                 name += '_%.3f' % data.edge_length[i].item()
             data.edge_name.append(name)
         return data
@@ -109,7 +82,7 @@ class AddAngleDihedral(object):
 
     @staticmethod
     def iter_angle_triplet(bond_mat):
-        n_atoms = bond_mat.size(0)
+        n_atoms = bond_mat.shape[0]
         for j in range(n_atoms):
             for k in range(n_atoms):
                 for l in range(n_atoms):
@@ -122,7 +95,7 @@ class AddAngleDihedral(object):
 
     @staticmethod
     def iter_dihedral_quartet(bond_mat):
-        n_atoms = bond_mat.size(0)
+        n_atoms = bond_mat.shape[0]
         for i in range(n_atoms):
             for j in range(n_atoms):
                 if i >= j:
@@ -139,17 +112,13 @@ class AddAngleDihedral(object):
                         yield k, i, j, l
 
     def __call__(self, data: Data):
-        N = data.num_nodes
-        if 'is_bond' in data:
-            bond_mat = to_dense_adj(data.edge_index, edge_attr=data.is_bond
-                ).long().squeeze(0) > 0
-        else:
-            bond_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type
-                ).long().squeeze(0) > 0
-        data.angle_index = paddle.LongTensor(list(self.iter_angle_triplet(
-            bond_mat))).t()
-        data.dihedral_index = paddle.LongTensor(list(self.
-            iter_dihedral_quartet(bond_mat))).t()
+        edge_attr = data.is_bond if 'is_bond' in data else data.edge_type
+        bond_mat = to_dense_adj(data.edge_index, edge_attr=edge_attr,
+                                max_num_nodes=data.num_nodes).squeeze(0) > 0
+        data.angle_index = paddle.to_tensor(list(self.iter_angle_triplet(bond_mat)),
+                                            dtype='int64', place=bond_mat.place).reshape([-1, 3]).T
+        data.dihedral_index = paddle.to_tensor(list(self.iter_dihedral_quartet(bond_mat)),
+                                               dtype='int64', place=bond_mat.place).reshape([-1, 4]).T
         return data
 
 
@@ -159,5 +128,6 @@ class CountNodesPerGraph(object):
         super().__init__()
 
     def __call__(self, data):
-        data.num_nodes_per_graph = paddle.LongTensor([data.num_nodes])
+        place = data.pos.place if 'pos' in data else None
+        data.num_nodes_per_graph = paddle.to_tensor([data.num_nodes], dtype='int64', place=place)
         return data

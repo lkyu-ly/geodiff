@@ -1,17 +1,15 @@
-import sys
-sys.path.append('/home/lkyu/baidu/geodiff/geodiff_paddle')
-from paddle_utils import *
-import paddle
-import numpy as np
-import pandas as pd
 import multiprocessing as mp
-from torch_geometric.data import Data
 from functools import partial
+
+import numpy as np
+
 from easydict import EasyDict
-from tqdm.auto import tqdm
-from rdkit import Chem
 from rdkit.Chem.rdForceFieldHelpers import MMFFOptimizeMolecule
-from ..chem import set_rdmol_positions, get_best_rmsd
+from tqdm.auto import tqdm
+
+from graph_data import Data
+
+from ..chem import get_best_rmsd, set_rdmol_positions
 
 
 def get_rmsd_confusion_matrix(data: Data, useFF=False):
@@ -21,7 +19,7 @@ def get_rmsd_confusion_matrix(data: Data, useFF=False):
         (), 3)
     num_gen = data['pos_gen'].shape[0]
     num_ref = data['pos_ref'].shape[0]
-    rmsd_confusion_mat = -1 * np.ones([num_ref, num_gen], dtype=np.float)
+    rmsd_confusion_mat = np.empty((num_ref, num_gen), dtype=np.float64)
     for i in range(num_gen):
         gen_mol = set_rdmol_positions(data['rdmol'], data['pos_gen'][i])
         if useFF:
@@ -34,11 +32,13 @@ def get_rmsd_confusion_matrix(data: Data, useFF=False):
 
 def evaluate_conf(data: Data, useFF=False, threshold=0.5):
     rmsd_confusion_mat = get_rmsd_confusion_matrix(data, useFF=useFF)
-    rmsd_ref_min = rmsd_confusion_mat._min(-1)
+    rmsd_ref_min = rmsd_confusion_mat.min(axis=1)
     return (rmsd_ref_min <= threshold).mean(), rmsd_ref_min.mean()
 
 
 def print_covmat_results(results, print_fn=print):
+    import pandas as pd
+
     df = pd.DataFrame({'COV-R_mean': np.mean(results.CoverageR, 0),
         'COV-R_median': np.median(results.CoverageR, 0), 'COV-R_std': np.
         std(results.CoverageR, 0), 'COV-P_mean': np.mean(results.CoverageP,
@@ -94,8 +94,8 @@ class CovMatEvaluator(object):
         matp_scores = []
         for confusion_mat in tqdm(self.pool.imap(func, filtered_data_list),
             total=len(filtered_data_list)):
-            rmsd_ref_min = confusion_mat._min(-1)
-            rmsd_gen_min = confusion_mat._min(0)
+            rmsd_ref_min = confusion_mat.min(axis=1)
+            rmsd_gen_min = confusion_mat.min(axis=0)
             rmsd_cov_thres = rmsd_ref_min.reshape(-1, 1
                 ) <= self.thresholds.reshape(1, -1)
             rmsd_jnk_thres = rmsd_gen_min.reshape(-1, 1

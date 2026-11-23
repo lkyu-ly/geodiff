@@ -1,136 +1,104 @@
-# GeoDiff: a Geometric Diffusion Model for Molecular Conformation Generation
+# GeoDiff on Paddle
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/MinkaiXu/GeoDiff/blob/main/LICENSE)
 
 [[OpenReview](https://openreview.net/forum?id=PzcvxEMzvQC)] [[arXiv](https://arxiv.org/abs/2203.02923)] [[Code](https://github.com/MinkaiXu/GeoDiff)]
 
-The official implementation of GeoDiff: A Geometric Diffusion Model for Molecular Conformation Generation (ICLR 2022 **Oral Presentation [54/3391]**).
+This directory ports [GeoDiff](https://github.com/MinkaiXu/GeoDiff) (ICLR 2022) to Paddle. The [Torch reference](../geodiff/) is separate. Run the commands below from the repository root; dataset paths in YAML are relative to that directory.
 
-![cover](assets/geodiff_framework.png)
+## Set up Paddle
 
-## Environments
-
-### Install via Conda (Recommended)
+Use Python 3.10 and Paddle 3.4.0. For the Linux x86-64 CUDA 13 build used in the QM9 checks:
 
 ```bash
-# Clone the environment
-conda env create -f env.yml
-# Activate the environment
-conda activate geodiff
-# Install PyG
-conda install pytorch-geometric=1.7.2=py37_torch_1.8.0_cu102 -c rusty1s -c conda-forge
+conda env create -f geodiff_paddle/env.yml
+conda activate geodiff-paddle
+python -m pip install https://paddle-whl.cdn.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0-cp310-cp310-linux_x86_64.whl
 ```
 
-## Dataset
+Install `pandas` for the COV/MAT report, `psikit` and its Psi4 backend for property evaluation, `py3Dmol` for interactive visualization, or `pytest` for the entry tests. These are not needed for QM9 training. Do not install Torch or PyG in the Paddle environment.
 
-### Offical Dataset
-The offical raw GEOM dataset is avaiable [[here]](https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/JNGTDF).
+## Export trusted QM9 assets offline
 
-### Preprocessed dataset
-We provide the preprocessed datasets (GEOM) in this [[google drive folder]](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing). After downleading the dataset, it should be put into the folder path as specified in the `dataset` variable of config files `./configs/*.yml`.
-
-### Prepare your own GEOM dataset from scratch (optional)
-
-You can also download origianl GEOM full dataset and prepare your own data split. A guide is available at previous work ConfGF's [[github page]](https://github.com/DeepGraphLearning/ConfGF#prepare-your-own-geom-dataset-from-scratch-optional).
-
-## Training
-
-All hyper-parameters and training details are provided in config files (`./configs/*.yml`), and free feel to tune these parameters.
-
-You can train the model with the following commands:
+Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. Run these commands in the separate Torch reference environment (PyG 1.7.2 with Torch-compatible torch-scatter, torch-sparse and torch-cluster builds):
 
 ```bash
-# Default settings
-python train.py ./config/qm9_default.yml
-python train.py ./config/drugs_default.yml
-# An ablation setting with fewer timesteps, as described in Appendix D.2.
-python train.py ./config/drugs_1k_default.yml
+python tools/export_paddle_assets.py weights checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.npz
+python tools/export_paddle_assets.py graphs data/QM9/train_data_40k.pkl runs/paddle_qm9/train_2.npz --limit 2
+python tools/export_paddle_assets.py graphs data/QM9/val_data_5k.pkl runs/paddle_qm9/val_2.npz --limit 2
 ```
 
-The model checkpoints, configuration yaml file as well as training log will be saved into a directory specified by `--logdir` in `train.py`.
+The exporter reads trusted files only, runs on CPU, and leaves the originals unchanged. The weights NPZ contains model weights in Paddle layout, not Adam or scheduler state. Graph NPZs keep graph order, molecule-local edge indices, and available SMILES and RDKit molecule data. Paddle reads those archives without pickle. For a complete split, omit `--limit` and write the corresponding NPZ at the path listed in the config.
 
-## Generation
+## Compare fixed QM9 forward outputs
 
-We provide the checkpoints of two trained models, i.e., `qm9_default` and `drugs_default` in the [[google drive folder]](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing). Note that, please put the checkpoints `*.pt` into paths like `${log}/${model}/checkpoints/`, and also put corresponding configuration file `*.yml` into the upper level directory `${log}/${model}/`.
-
-<font color="red">Attention</font>: if you want to use pretrained models, please use the code at the [`pretrain`](https://github.com/MinkaiXu/GeoDiff/tree/pretrain) branch, which is the vanilla codebase for reproducing the results with our pretrained models. We recently notice some issue of the codebase and update it, making the `main` branch not compatible well with the previous checkpoints.
-
-You can generate conformations for entire or part of test sets by:
+Return to the Paddle environment. Use the saved Torch fixed-input reference (`runs/torch_qm9_smoke/forward.npz`) and first official validation graph reference (`runs/paddle_qm9/qm9_val_first_graph_ref.npz`):
 
 ```bash
-python test.py ${log}/${model}/checkpoints/${iter}.pt \
-    --start_idx 800 --end_idx 1000
+PYTHONPATH=geodiff_paddle python tools/check_paddle_forward.py \
+  --forward runs/torch_qm9_smoke/forward.npz \
+  --val-graph runs/paddle_qm9/qm9_val_first_graph_ref.npz \
+  --weights runs/paddle_qm9/qm9_default.npz \
+  --train runs/paddle_qm9/train_2.npz --device gpu:0
 ```
-Here `start_idx` and `end_idx` indicate the range of the test set that we want to use. All hyper-parameters related to sampling can be set in `test.py` files. Specifically, for testing qm9 model, you could add the additional arg `--w_global 0.3`, which empirically shows slightly better results.
 
-Conformations of some drug-like molecules generated by GeoDiff are provided below.
+This checks edges, types and masks exactly, and float32 lengths and scores at `atol=1e-5, rtol=1e-4`. It also checks loss and backward on the exported training graphs, without an optimizer step.
 
-<p align="center">
-  <img src="assets/exp_drugs.png" /> 
-</p>
+## Run one training update and resume
 
-## Evaluation
-
-After generating conformations following the obove commands, the results of all benchmark tasks can be calculated based on the generated data.
-
-### Task 1. Conformation Generation
-
-The `COV` and `MAT` scores on the GEOM datasets can be calculated using the following commands:
+In the Paddle environment, make a two-graph batch config and run one update followed by validation:
 
 ```bash
-python eval_covmat.py ${log}/${model}/${sample}/sample_all.pkl
+python - <<'PY'
+from pathlib import Path
+import yaml
+
+cfg = yaml.safe_load(Path('geodiff_paddle/configs/qm9_default.yml').read_text())
+cfg['dataset'].update(train='runs/paddle_qm9/train_2.npz', val='runs/paddle_qm9/val_2.npz')
+cfg['train']['batch_size'] = 2
+Path('runs/paddle_qm9/qm9_smoke.yml').write_text(yaml.safe_dump(cfg, sort_keys=False))
+PY
+
+python geodiff_paddle/train.py runs/paddle_qm9/qm9_smoke.yml \
+  --device gpu:0 --weights runs/paddle_qm9/qm9_default.npz \
+  --max_iters 1 --val_batches 1 --logdir runs/paddle_qm9/train
+
+run=$(ls -dt runs/paddle_qm9/train/qm9_smoke_* | head -n 1)
+python geodiff_paddle/train.py "$run" \
+  --device gpu:0 --resume_iter 1 --max_iters 2 --val_batches 1 --logdir runs/paddle_qm9/train
 ```
 
+The fresh run starts with released model weights and two new Adam optimizers; the resume run restores model and optimizer state from the trusted native `checkpoints/1.pdckpt`. This checks one update and native resume, not historical Torch training.
 
-### Task 2. Property Prediction
+## Optional sampling and evaluation
 
-For the property prediction, we use a small split of qm9 different from the `Conformation Generation` task. This split is also provided in the [[google drive folder]](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing). Generating conformations and evaluate `mean  absolute errors (MAR)` metric on this split can be done by the following commands:
+In the offline Torch environment, export the complete test and property splits. Do not pass the official PyG pickles directly to any Paddle entry.
 
 ```bash
-python ${log}/${model}/checkpoints/${iter}.pt --num_confs 50 \
-      --start_idx 0 --test_set data/GEOM/QM9/qm9_property.pkl
-python eval_prop.py --generated ${log}/${model}/${sample}/sample_all.pkl
+python tools/export_paddle_assets.py graphs data/QM9/test_data_1k.pkl data/QM9/test_data_1k.npz
+python tools/export_paddle_assets.py graphs data/QM9/qm9_property.pkl data/QM9/qm9_property.npz
 ```
 
-## Visualizing molecules with PyMol
+In the Paddle environment, sample with released weights or replace `--weights FILE.npz` with a trusted native positional `ITER.pdckpt`. NPZ weights use the QM9 config by default; `--config` selects a different YAML. Native checkpoints use their embedded config unless overridden. `--test_set` overrides the dataset path; use the property NPZ there for property evaluation.
 
-Here we also provide a guideline for visualizing molecules with PyMol. The guideline is borrowed from previous work ConfGF's [[github page]](https://github.com/DeepGraphLearning/ConfGF#prepare-your-own-geom-dataset-from-scratch-optional).
+```bash
+python geodiff_paddle/test.py --weights runs/paddle_qm9/qm9_default.npz \
+  --start_idx 0 --end_idx 5 --out_dir runs/paddle_qm9/sample
+python geodiff_paddle/eval_covmat.py.py runs/paddle_qm9/sample/samples_all.pkl
 
-### Start Setup
+python geodiff_paddle/test.py --weights runs/paddle_qm9/qm9_default.npz \
+  --test_set data/QM9/qm9_property.npz --num_confs 50 \
+  --start_idx 0 --end_idx 5 --out_dir runs/paddle_qm9/property
+python geodiff_paddle/eval_prop.py --dataset data/QM9/qm9_property.npz \
+  --generated runs/paddle_qm9/property/samples_all.pkl
+```
 
-1. `pymol -R`
-2. `Display - Background - White`
-3. `Display - Color Space - CMYK`
-4. `Display - Quality - Maximal Quality`
-5. `Display Grid`
-   1. by object:  use `set grid_slot, int, mol_name` to put the molecule into the corresponding slot
-   2. by state: align all conformations in a single slot
-   3. by object-state: align all conformations and put them in separate slots. (`grid_slot` dont work!)
-6. `Setting - Line and Sticks - Ball and Stick on - Ball and Stick ratio: 1.5`
-7. `Setting - Line and Sticks - Stick radius: 0.2 - Stick Hydrogen Scale: 1.0`
+Sampling groups reference conformers by SMILES in archive order. The `samples_*.pkl` files store local Paddle graph objects and RDKit molecules; use only trusted local files for sampling `--resume` and evaluator input. COV/MAT writes `_covmat.csv` and `_covmat.pkl`. The property evaluator keeps separate `_ref_prop.pkl` and `_gen_prop.pkl` caches beside their inputs; load only trusted native caches. Optional Python dataset classes can open locally preprocessed native graphs via `trusted_pickle=True`; NPZ remains the default and no loader falls back to official PyG pickle.
 
-### Show Molecule
-
-1. To show molecules
-
-   1. `hide everything`
-   2. `show sticks`
-
-2. To align molecules: `align name1, name2`
-
-3. Convert RDKit mol to Pymol
-
-   ```python
-   from rdkit.Chem import PyMol
-   v= PyMol.MolViewer()
-   rdmol = Chem.MolFromSmiles('C')
-   v.ShowMol(rdmol, name='mol')
-   v.SaveFile('mol.pkl')
-   ```
-
+The optional entry checks cover CLI startup, weight and checkpoint loading without a sampling step, graph preparation, and the two COV/MAT reduction axes. They do not validate complete diffusion sampling, Drugs, property estimates, or paper metrics. For PyMol usage, see the [upstream guide](../geodiff/README.md#visualizing-molecules-with-pymol).
 
 ## Citation
-Please consider citing the our paper if you find it helpful. Thank you!
+If you use GeoDiff, please cite the original paper:
 ```
 @inproceedings{
 xu2022geodiff,
@@ -144,13 +112,4 @@ url={https://openreview.net/forum?id=PzcvxEMzvQC}
 
 ## Acknowledgement
 
-This repo is built upon the previous work ConfGF's [[codebase]](https://github.com/DeepGraphLearning/ConfGF#prepare-your-own-geom-dataset-from-scratch-optional). Thanks Chence and Shitong!
-
-## Contact
-
-If you have any question, please contact me at minkai.xu@umontreal.ca or xuminkai@mila.quebec.
-
-## Known issues
-
-1. The current codebase is not compatible with more recent torch-geometric versions.
-2. The current processed dataset (with PyD data object) is not compatible with more recent torch-geometric versions.
+GeoDiff builds on the [ConfGF codebase](https://github.com/DeepGraphLearning/ConfGF).

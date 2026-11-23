@@ -1,19 +1,21 @@
-import paddle
-import os
-import pickle
 import argparse
+import pickle
+from pathlib import Path
+
 import numpy as np
-from psikit import Psikit
 from tqdm.auto import tqdm
 from easydict import EasyDict
-from torch_geometric.data import Data
-from utils.datasets import PackedConformationDataset
+
+from graph_data import Data
 from utils.chem import set_rdmol_positions
+from utils.datasets import PackedConformationDataset
 
 
 class PropertyCalculator(object):
 
     def __init__(self, threads, memory, seed):
+        from psikit import Psikit
+
         super().__init__()
         self.pk = Psikit(threads=threads, memory=memory)
         self.seed = seed
@@ -72,19 +74,20 @@ HART_TO_EV = 27.211
 HART_TO_KCALPERMOL = 627.5
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default=
-        './data/GEOM/QM9/qm9_property.pkl')
-    parser.add_argument('--generated', type=str, default=None)
+    parser.add_argument('--dataset', type=Path, default=Path('data/QM9/qm9_property.npz'),
+                        help='exported reference graph dataset .npz')
+    parser.add_argument('--generated', type=Path, help='trusted local sampling results .pkl')
     parser.add_argument('--num_confs', type=int, default=50)
     parser.add_argument('--threads', type=int, default=8)
     parser.add_argument('--memory', type=int, default=16)
     parser.add_argument('--seed', type=int, default=2021)
     args = parser.parse_args()
+    if args.dataset.suffix != '.npz':
+        parser.error('--dataset must be an exported .npz graph dataset')
     prop_cal = PropertyCalculator(threads=args.threads, memory=args.memory,
         seed=args.seed)
-    cache_ref_fn = os.path.join(os.path.dirname(args.dataset), os.path.
-        basename(args.dataset)[:-4] + '_prop.pkl')
-    if not os.path.exists(cache_ref_fn):
+    cache_ref_fn = args.dataset.with_name(f'{args.dataset.stem}_ref_prop.pkl')
+    if not cache_ref_fn.exists():
         dset = PackedConformationDataset(args.dataset)
         dset = [data for data in dset]
         dset_prop = []
@@ -100,9 +103,8 @@ if __name__ == '__main__':
     if args.generated is None:
         exit()
     print('Start evaluation.')
-    cache_gen_fn = os.path.join(os.path.dirname(args.generated), os.path.
-        basename(args.generated)[:-4] + '_prop.pkl')
-    if not os.path.exists(cache_gen_fn):
+    cache_gen_fn = args.generated.with_name(f'{args.generated.stem}_gen_prop.pkl')
+    if not cache_gen_fn.exists():
         with open(args.generated, 'rb') as f:
             gens = pickle.load(f)
         gens_prop = []

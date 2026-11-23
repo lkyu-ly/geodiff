@@ -1,25 +1,24 @@
-import sys
-sys.path.append('/home/lkyu/baidu/geodiff/geodiff_paddle')
-from paddle_utils import *
-import paddle
-import os
-import pickle
 import copy
 import json
-from collections import defaultdict
-import numpy as np
+import os
+import pickle
 import random
-from torch_geometric.data import Data, Dataset, Batch
-from torch_geometric.utils import to_networkx
-from torch_scatter import scatter
-import rdkit
-from rdkit import Chem
-from rdkit.Chem.rdchem import Mol, HybridizationType, BondType
-from rdkit import RDLogger
+from collections import defaultdict
+
 import networkx as nx
+import numpy as np
+import paddle
+
+from graph_data import Batch, Data, load_graphs, to_networkx
+from graph_ops import scatter_add
+from rdkit import Chem
+from rdkit.Chem.rdchem import Mol, HybridizationType
+from rdkit import RDLogger
 from tqdm import tqdm
-RDLogger.DisableLog('rdApp.*')
+
 from .chem import BOND_TYPES, mol_to_smiles
+
+RDLogger.DisableLog('rdApp.*')
 
 
 def prepare_pdb2(scn_dir, data_path):
@@ -177,8 +176,7 @@ def pdb_to_data(pdb_path, name):
     pdb_infos = pdb_infos[1:-1]
     assert mol.GetNumConformers() == 1
     N = mol.GetNumAtoms()
-    pos = paddle.tensor(mol.GetConformer(0).GetPositions(), dtype=paddle.
-        float32)
+    pos = paddle.to_tensor(mol.GetConformer(0).GetPositions(), dtype='float32')
     atomic_number = []
     aromatic = []
     is_sidechain = []
@@ -212,34 +210,34 @@ def pdb_to_data(pdb_path, name):
         atom2res.append(info.GetResidueNumber() - 1)
     num_res = len(set(atom2res))
     atom2res = np.array(atom2res)
-    atom2res -= atom2res._min()
-    atom2res = paddle.tensor(atom2res, dtype=paddle.long)
-    is_sidechain = paddle.tensor(is_sidechain).bool()
-    is_alpha = paddle.tensor(is_alpha).bool()
-    dummy_index = paddle.arange(pos.size(0))
+    atom2res -= atom2res.min()
+    atom2res = paddle.to_tensor(atom2res, dtype='int64')
+    is_sidechain = paddle.to_tensor(is_sidechain, dtype='bool')
+    is_alpha = paddle.to_tensor(is_alpha, dtype='bool')
+    dummy_index = paddle.arange(pos.shape[0])
     alpha_index = dummy_index[is_alpha]
-    res2alpha_index = -paddle.ones(5000, dtype=paddle.long)
+    res2alpha_index = -paddle.ones([5000], dtype='int64')
     res2alpha_index[atom2res[is_alpha]] = alpha_index
     atom2alpha_index = res2alpha_index[atom2res]
     if is_sidechain.sum().item() == 0:
         return None
-    z = paddle.tensor(atomic_number, dtype=paddle.long)
+    z = paddle.to_tensor(atomic_number, dtype='int64')
     row, col, edge_type = [], [], []
     for bond in mol.GetBonds():
         start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         row += [start, end]
         col += [end, start]
         edge_type += 2 * [BOND_TYPES[bond.GetBondType()]]
-    edge_index = paddle.tensor([row, col], dtype=paddle.long)
-    edge_type = paddle.tensor(edge_type)
-    if edge_index.size(1) == 0:
+    edge_index = paddle.to_tensor([row, col], dtype='int64')
+    edge_type = paddle.to_tensor(edge_type, dtype='int64')
+    if edge_index.shape[1] == 0:
         return None
     perm = (edge_index[0] * N + edge_index[1]).argsort()
     edge_index = edge_index[:, perm]
     edge_type = edge_type[perm]
     row, col = edge_index
-    hs = (z == 1).to(paddle.float32)
-    num_hs = scatter(hs[row], col, dim_size=N, reduce='sum').tolist()
+    hs = (z == 1).astype('float32')
+    num_hs = scatter_add(hs[row], col, dim_size=N).tolist()
     data = Data(atom_type=z, pos=pos, edge_index=edge_index, edge_type=
         edge_type, is_alpha=is_alpha, rdmol=copy.deepcopy(mol), name=name,
         is_sidechain=is_sidechain, atom2res=atom2res, atom2alpha_index=
@@ -250,8 +248,7 @@ def pdb_to_data(pdb_path, name):
 def rdmol_to_data(mol: Mol, smiles=None, data_cls=Data):
     assert mol.GetNumConformers() == 1
     N = mol.GetNumAtoms()
-    pos = paddle.tensor(mol.GetConformer(0).GetPositions(), dtype=paddle.
-        float32)
+    pos = paddle.to_tensor(mol.GetConformer(0).GetPositions(), dtype='float32')
     atomic_number = []
     aromatic = []
     sp = []
@@ -265,21 +262,21 @@ def rdmol_to_data(mol: Mol, smiles=None, data_cls=Data):
         sp.append(1 if hybridization == HybridizationType.SP else 0)
         sp2.append(1 if hybridization == HybridizationType.SP2 else 0)
         sp3.append(1 if hybridization == HybridizationType.SP3 else 0)
-    z = paddle.tensor(atomic_number, dtype=paddle.long)
+    z = paddle.to_tensor(atomic_number, dtype='int64')
     row, col, edge_type = [], [], []
     for bond in mol.GetBonds():
         start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         row += [start, end]
         col += [end, start]
         edge_type += 2 * [BOND_TYPES[bond.GetBondType()]]
-    edge_index = paddle.tensor([row, col], dtype=paddle.long)
-    edge_type = paddle.tensor(edge_type)
+    edge_index = paddle.to_tensor([row, col], dtype='int64')
+    edge_type = paddle.to_tensor(edge_type, dtype='int64')
     perm = (edge_index[0] * N + edge_index[1]).argsort()
     edge_index = edge_index[:, perm]
     edge_type = edge_type[perm]
     row, col = edge_index
-    hs = (z == 1).to(paddle.float32)
-    num_hs = scatter(hs[row], col, dim_size=N, reduce='sum').tolist()
+    hs = (z == 1).astype('float32')
+    num_hs = scatter_add(hs[row], col, dim_size=N).tolist()
     if smiles is None:
         smiles = Chem.MolToSmiles(mol)
     data = data_cls(atom_type=z, pos=pos, edge_index=edge_index, edge_type=
@@ -291,15 +288,14 @@ class MolClusterData(Data):
 
     def __inc__(self, key, value):
         if key == 'subgraph_index':
-            return self.subgraph_index._max().item() + 1
+            return self.subgraph_index.max().item() + 1
         else:
             return super().__inc__(key, value)
 
 
 def rdmol_cluster_to_data(mol: Mol, smiles=None):
     data = rdmol_to_data(mol, smiles, data_cls=MolClusterData)
-    data.subgraph_index = paddle.zeros([data.atom_type.size(0)], dtype=
-        paddle.long)
+    data.subgraph_index = paddle.zeros([data.num_nodes], dtype='int64', device=data.pos.place)
     for i, subgraph in enumerate(nx.connected_components(to_networkx(data,
         to_undirected=True))):
         data.subgraph_index[list(subgraph)] = i
@@ -403,7 +399,7 @@ def preprocess_GEOM_dataset(base_path, dataset_name, max_conf=5, train_size
             labels = {'totalenergy': conf_meta['totalenergy'],
                 'boltzmannweight': conf_meta['boltzmannweight']}
             for k, v in labels.items():
-                data[k] = paddle.tensor([v], dtype=paddle.float32)
+                data[k] = paddle.to_tensor([v], dtype='float32')
             datas.append(data)
         eps = np.random.rand()
         if eps <= train_size:
@@ -513,8 +509,8 @@ def preprocess_GEOM_dataset_with_fixed_num_conf(base_path, dataset_name,
             labels = {'totalenergy': conf_meta['totalenergy'],
                 'boltzmannweight': conf_meta['boltzmannweight']}
             for k, v in labels.items():
-                data[k] = paddle.tensor([v], dtype=paddle.float32)
-            data['idx'] = paddle.tensor([i], dtype=paddle.long)
+                data[k] = paddle.to_tensor([v], dtype='float32')
+            data['idx'] = paddle.to_tensor([i], dtype='int64')
             datas.append(data)
         assert len(datas) == conf_per_mol
         """
@@ -627,8 +623,8 @@ def get_test_set_with_large_num_conf(base_path, dataset_name, block,
             labels = {'totalenergy': conf_meta['totalenergy'],
                 'boltzmannweight': conf_meta['boltzmannweight']}
             for k, v in labels.items():
-                data[k] = paddle.tensor([v], dtype=paddle.float32)
-            data['idx'] = paddle.tensor([i], dtype=paddle.long)
+                data[k] = paddle.to_tensor([v], dtype='float32')
+            data['idx'] = paddle.to_tensor([i], dtype='int64')
             datas.append(data)
         all_test_data.extend(datas)
         num_valid_mol += 1
@@ -638,12 +634,19 @@ def get_test_set_with_large_num_conf(base_path, dataset_name, block,
     return all_test_data
 
 
-class ConformationDataset(Dataset):
+class ConformationDataset(paddle.io.Dataset):
+    """Load NPZ graphs, or explicitly opt in to trusted native preprocessing output."""
 
-    def __init__(self, path, transform=None):
+    def __init__(self, path, transform=None, *, trusted_pickle=False):
         super().__init__()
-        with open(path, 'rb') as f:
-            self.data = pickle.load(f)
+        suffix = os.path.splitext(path)[1]
+        if suffix == '.npz':
+            self.data = load_graphs(path)
+        elif suffix == '.pkl' and trusted_pickle:
+            with open(path, 'rb') as f:
+                self.data = pickle.load(f)
+        else:
+            raise ValueError('Expected an exported .npz graph dataset')
         self.transform = transform
         self.atom_types = self._atom_types()
         self.edge_types = self._edge_types()
@@ -675,8 +678,8 @@ class ConformationDataset(Dataset):
 class SidechainConformationDataset(ConformationDataset):
 
     def __init__(self, path, transform=None, cutoff=10.0, max_residue=5000,
-        fix_subgraph=False):
-        super().__init__(path, transform)
+                 fix_subgraph=False, *, trusted_pickle=False):
+        super().__init__(path, transform, trusted_pickle=trusted_pickle)
         self.cutoff = cutoff
         self.max_residue = max_residue
         self.fix_subgraph = fix_subgraph
@@ -693,25 +696,23 @@ class SidechainConformationDataset(ConformationDataset):
         pos = data.pos
         edge_index = data.edge_index
         atom2res = data.atom2res
-        dummy_index = paddle.arange(pos.size(0))
+        dummy_index = paddle.arange(pos.shape[0], device=pos.place)
         backbone_index = dummy_index[~is_sidechain]
         if self.fix_subgraph:
-            center_atom_index = backbone_index[backbone_index.size(0) // 2
-                ].view(1)
+            center_atom_index = backbone_index[backbone_index.shape[0] // 2].reshape([1])
         else:
-            center_atom_index = backbone_index[paddle.randint(low=0, high=
-                backbone_index.size(0), shape=(1,))]
+            center_atom_index = backbone_index[paddle.randint(
+                low=0, high=backbone_index.shape[0], shape=[1], device=pos.place)]
         pos_center_atom = pos[center_atom_index]
-        distance = (pos_center_atom - pos).norm(dim=-1)
+        distance = paddle.linalg.norm(pos_center_atom - pos, axis=-1)
         mask = distance <= self.cutoff
-        is_keep_residue = scatter(mask, atom2res, dim=-1, dim_size=self.
-            max_residue, reduce='sum')
+        is_keep_residue = scatter_add(mask, atom2res, dim_size=self.max_residue)
         is_keep_atom = is_keep_residue[atom2res]
         is_keep_edge = is_keep_atom[edge_index[0]] & is_keep_atom[edge_index[1]
             ]
-        mapping = -paddle.ones(pos.size(0), dtype=paddle.long)
+        mapping = -paddle.ones([pos.shape[0]], dtype='int64', device=pos.place)
         keep_index = dummy_index[is_keep_atom]
-        mapping[keep_index] = paddle.arange(keep_index.size(0))
+        mapping[keep_index] = paddle.arange(keep_index.shape[0], device=pos.place)
         if data.is_sidechain[is_keep_atom].sum().item() == 0:
             return None
         subgraph_data = Data(atom_type=data.atom_type[is_keep_atom], pos=
@@ -740,26 +741,25 @@ def accumulate_grad_from_subgraph(model, atom_type, pos, bond_index,
     4. return grads
     """
     accumulated_grad = paddle.zeros_like(pos)
-    accumulated_time = paddle.zeros(pos.size(0), device=pos.deivce)
+    accumulated_time = paddle.zeros_like(pos[:, 0])
     all_subgraphs = []
-    dummy_index = paddle.arange(pos.size(0))
-    is_covered = paddle.zeros(pos.size(0), device=pos.deivce).bool()
+    dummy_index = paddle.arange(pos.shape[0], device=pos.place)
+    is_covered = paddle.zeros_like(atom2res, dtype='bool')
     is_alpha_and_uncovered = is_alpha & ~is_covered
     while is_alpha_and_uncovered.sum().item() != 0:
         alpha_index = dummy_index[is_alpha_and_uncovered]
-        center_atom_index = alpha_index[paddle.randint(low=0, high=
-            alpha_index.size(0), shape=(1,))]
+        center_atom_index = alpha_index[paddle.randint(
+            low=0, high=alpha_index.shape[0], shape=[1], device=pos.place)]
         pos_center_atom = pos[center_atom_index]
-        distance = (pos_center_atom - pos).norm(dim=-1)
+        distance = paddle.linalg.norm(pos_center_atom - pos, axis=-1)
         mask = distance <= cutoff
-        is_keep_residue = scatter(mask, atom2res, dim=-1, dim_size=
-            max_residue, reduce='sum')
+        is_keep_residue = scatter_add(mask, atom2res, dim_size=max_residue)
         is_keep_atom = is_keep_residue[atom2res]
         is_keep_edge = is_keep_atom[bond_index[0]] & is_keep_atom[bond_index[1]
             ]
-        mapping = -paddle.ones(pos.size(0), dtype=paddle.long)
+        mapping = -paddle.ones([pos.shape[0]], dtype='int64', device=pos.place)
         keep_index = dummy_index[is_keep_atom]
-        mapping[keep_index] = paddle.arange(keep_index.size(0))
+        mapping[keep_index] = paddle.arange(keep_index.shape[0], device=pos.place)
         is_covered |= is_keep_atom
         is_alpha_and_uncovered = is_alpha & ~is_covered
         if is_sidechain[is_keep_atom].sum().item() == 0:
@@ -779,38 +779,25 @@ def accumulate_grad_from_subgraph(model, atom_type, pos, bond_index,
 
 class PackedConformationDataset(ConformationDataset):
 
-    def __init__(self, path, transform=None):
-        super().__init__(path, transform)
+    def __init__(self, path, transform=None, *, trusted_pickle=False):
+        super().__init__(path, transform, trusted_pickle=trusted_pickle)
         self._pack_data_by_mol()
 
     def _pack_data_by_mol(self):
-        """
-        pack confs with same mol into a single data object
-        """
-        self._packed_data = defaultdict(list)
-        if hasattr(self.data, 'idx'):
-            for i in range(len(self.data)):
-                self._packed_data[self.data[i].idx.item()].append(self.data[i])
-        else:
-            for i in range(len(self.data)):
-                self._packed_data[self.data[i].smiles].append(self.data[i])
-        print('[Packed] %d Molecules, %d Conformations.' % (len(self.
-            _packed_data), len(self.data)))
-        new_data = []
-        cnt = 0
-        for k, v in self._packed_data.items():
-            data = copy.deepcopy(v[0])
-            all_pos = []
-            for i in range(len(v)):
-                all_pos.append(v[i].pos)
-            data.pos_ref = paddle.cat(all_pos, 0)
-            data.num_pos_ref = paddle.tensor([len(all_pos)], dtype=paddle.long)
-            if hasattr(data, 'totalenergy'):
-                del data.totalenergy
-            if hasattr(data, 'boltzmannweight'):
-                del data.boltzmannweight
-            new_data.append(data)
-        self.new_data = new_data
+        """Pack conformers by SMILES in first-appearance order."""
+        groups = defaultdict(list)
+        for graph in self.data:
+            groups[graph.smiles].append(graph)
+        print('[Packed] %d Molecules, %d Conformations.' % (len(groups), len(self.data)))
+        self.new_data = []
+        for group in groups.values():
+            data = group[0].clone()
+            data.pos_ref = paddle.concat([graph.pos for graph in group], axis=0)
+            data.num_pos_ref = paddle.to_tensor([len(group)], dtype='int64', place=data.pos.place)
+            for key in ('totalenergy', 'boltzmannweight'):
+                if key in data:
+                    del data[key]
+            self.new_data.append(data)
 
     def __getitem__(self, idx):
         data = self.new_data[idx].clone()
