@@ -1,8 +1,7 @@
 import paddle
-import os
-import time
 import math
 import numpy as np
+from paddle.nn import functional as F
 
 
 def get_timestep_embedding(timesteps, embedding_dim):
@@ -16,12 +15,11 @@ def get_timestep_embedding(timesteps, embedding_dim):
     assert len(timesteps.shape) == 1
     half_dim = embedding_dim // 2
     emb = math.log(10000) / (half_dim - 1)
-    emb = paddle.exp(paddle.arange(half_dim, dtype=paddle.float32) * -emb)
-    emb = emb.to(device=timesteps.device)
-    emb = timesteps.float()[:, None] * emb[None, :]
-    emb = paddle.cat([paddle.sin(emb), paddle.cos(emb)], dim=1)
+    emb = paddle.exp(paddle.arange(half_dim, dtype='float32', device=timesteps.place) * -emb)
+    emb = timesteps.astype('float32')[:, None] * emb[None, :]
+    emb = paddle.concat([paddle.sin(emb), paddle.cos(emb)], axis=1)
     if embedding_dim % 2 == 1:
-        emb = paddle.compat.nn.functional.pad(emb, (0, 1, 0, 0))
+        emb = F.pad(emb, [0, 1], pad_from_left_axis=False)
     return emb
 
 

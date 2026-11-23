@@ -1,14 +1,9 @@
 import paddle
-from torch_geometric.nn import MessagePassing, radius_graph
-from torch_sparse import coalesce
-from torch_geometric.data import Data
-from torch_geometric.utils import to_dense_adj, dense_to_sparse
-from math import pi as PI
-from utils.chem import BOND_TYPES
-from ..common import MeanReadout, SumReadout, MultiLayerPerceptron
+from ..common import MultiLayerPerceptron
+from .schnet import GaussianSmearing
 
 
-class GaussianSmearingEdgeEncoder(paddle.nn.Module):
+class GaussianSmearingEdgeEncoder(paddle.nn.Layer):
 
     def __init__(self, num_gaussians=64, cutoff=10.0):
         super().__init__()
@@ -30,12 +25,11 @@ class GaussianSmearingEdgeEncoder(paddle.nn.Module):
         Returns:
             edge_attr:  The representation of edges. (E, 2 * num_gaussians)
         """
-        edge_attr = paddle.cat([self.rbf(edge_length), self.bond_emb(
-            edge_type)], dim=1)
+        edge_attr = paddle.concat([self.rbf(edge_length), self.bond_emb(edge_type)], axis=1)
         return edge_attr
 
 
-class MLPEdgeEncoder(paddle.nn.Module):
+class MLPEdgeEncoder(paddle.nn.Layer):
 
     def __init__(self, hidden_dim=100, activation='relu'):
         super().__init__()
@@ -65,8 +59,7 @@ def get_edge_encoder(cfg):
     if cfg.edge_encoder == 'mlp':
         return MLPEdgeEncoder(cfg.hidden_dim, cfg.mlp_act)
     elif cfg.edge_encoder == 'gaussian':
-        return GaussianSmearingEdgeEncoder(config.hidden_dim // 2, cutoff=
-            config.cutoff)
+        return GaussianSmearingEdgeEncoder(cfg.hidden_dim // 2, cutoff=cfg.cutoff)
     else:
         raise NotImplementedError('Unknown edge encoder: %s' % cfg.edge_encoder
             )

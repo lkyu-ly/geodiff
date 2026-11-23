@@ -1,19 +1,19 @@
 import paddle
-from torch_geometric.nn import radius_graph, radius
-from torch_scatter import scatter_mean, scatter_add, scatter_max
-from torch_sparse import coalesce
-from torch_geometric.utils import to_dense_adj, dense_to_sparse
+from paddle import nn
+from paddle.nn import functional as F
+
+from graph_ops import coalesce, radius, radius_graph, scatter_add, scatter_max, scatter_mean, to_dense_adj
 from utils.chem import BOND_TYPES
 
 
-class MeanReadout(paddle.nn.Module):
+class MeanReadout(nn.Layer):
     """Mean readout operator over graphs with variadic sizes."""
 
     def forward(self, data, input):
         """
         Perform readout over the graph(s).
         Parameters:
-            data (torch_geometric.data.Data): batched graph
+            data: batched graph
             input (Tensor): node representations
         Returns:
             Tensor: graph representations
@@ -23,14 +23,14 @@ class MeanReadout(paddle.nn.Module):
         return output
 
 
-class SumReadout(paddle.nn.Module):
+class SumReadout(nn.Layer):
     """Sum readout operator over graphs with variadic sizes."""
 
     def forward(self, data, input):
         """
         Perform readout over the graph(s).
         Parameters:
-            data (torch_geometric.data.Data): batched graph
+            data: batched graph
             input (Tensor): node representations
         Returns:
             Tensor: graph representations
@@ -40,7 +40,7 @@ class SumReadout(paddle.nn.Module):
         return output
 
 
-class MultiLayerPerceptron(paddle.nn.Module):
+class MultiLayerPerceptron(nn.Layer):
     """
     Multi-layer Perceptron.
     Note there is no activation or dropout in the last layer.
@@ -62,10 +62,7 @@ class MultiLayerPerceptron(paddle.nn.Module):
             self.dropout = paddle.nn.Dropout(dropout)
         else:
             self.dropout = None
-        self.layers = paddle.nn.ModuleList()
-        for i in range(len(self.dims) - 1):
-            self.layers.append(paddle.compat.nn.Linear(self.dims[i], self.
-                dims[i + 1]))
+        self.layers = nn.LayerList(nn.Linear(a, b) for a, b in zip(self.dims, self.dims[1:]))
 
     def forward(self, input):
         """"""
@@ -81,8 +78,9 @@ class MultiLayerPerceptron(paddle.nn.Module):
 
 
 def assemble_atom_pair_feature(node_attr, edge_index, edge_attr):
-    h_row, h_col = node_attr[edge_index[0]], node_attr[edge_index[1]]
-    h_pair = paddle.cat([h_row * h_col, edge_attr], dim=-1)
+    h_row = paddle.gather(node_attr, edge_index[0])
+    h_col = paddle.gather(node_attr, edge_index[1])
+    h_pair = paddle.concat([h_row * h_col, edge_attr], axis=-1)
     return h_pair
 
 
@@ -96,80 +94,51 @@ def generate_symmetric_edge_noise(num_nodes_per_graph, edge_index,
     edge_start = num_nodes_square_cumsum - num_nodes_square
     edge_start = edge_start[edge2graph]
     all_len = num_nodes_square_cumsum[-1]
-    node_index = edge_index.t() - edge_offset.unsqueeze(-1)
-    node_large = (node_index.max(axis=-1), node_index.argmax(axis=-1))[0]
-    node_small = (node_index.min(axis=-1), node_index.argmin(axis=-1))[0]
+    node_index = edge_index.transpose([1, 0]) - edge_offset.unsqueeze(-1)
+    node_large = node_index.max(axis=-1)
+    node_small = node_index.min(axis=-1)
     undirected_edge_id = node_large * (node_large + 1
         ) + node_small + edge_start
-    symm_noise = paddle.zeros(size=[all_len.item()], device=device)
-    symm_noise.normal_()
+    symm_noise = paddle.randn([all_len.item()], device=device)
     d_noise = symm_noise[undirected_edge_id].unsqueeze(-1)
     return d_noise
 
 
-def _extend_graph_order(num_nodes, edge_index, edge_type, order=3):
-    """
-    Args:
-        num_nodes:  Number of atoms.
-        edge_index: Bond indices of the original graph.
-        edge_type:  Bond types of the original graph.
-        order:  Extension order.
-    Returns:
-        new_edge_index: Extended edge indices.
-        new_edge_type:  Extended edge types.
-    """
+def higher_order_edges(num_nodes, edge_index, edge_type, order=3):
+    """Return row-major edge indices, types and shortest bond hops as int64."""
+    edge_index = edge_index.astype(paddle.int64)
+    edge_type = edge_type.astype(paddle.int64)
+    if order <= 1 or edge_index.shape[1] == 0:
+        index, types = coalesce(edge_index, edge_type, num_nodes, num_nodes)
+        return index, types, paddle.ones_like(types)
 
-    def binarize(x):
-        return paddle.where(x > 0, paddle.ones_like(x), paddle.zeros_like(x))
+    bonds = to_dense_adj(edge_index, max_num_nodes=num_nodes).squeeze(0) > 0
+    diagonal = paddle.eye(num_nodes, dtype=paddle.float32, device=edge_index.place) != 0
+    adjacency = (bonds | diagonal).astype(paddle.float32)
+    hop = bonds.astype(paddle.int64)
+    reached = bonds | diagonal
+    for distance in range(2, order + 1):
+        next_reached = (reached.astype(paddle.float32) @ adjacency) > 0
+        hop = paddle.where(next_reached & ~reached, distance, hop)
+        reached = next_reached
 
-    def get_higher_order_adj_matrix(adj, order):
-        """
-        Args:
-            adj:        (N, N)
-            type_mat:   (N, N)
-        Returns:
-            Following attributes will be updated:
-              - edge_index
-              - edge_type
-            Following attributes will be added to the data object:
-              - bond_edge_index:  Original edge_index.
-        """
-        adj_mats = [paddle.eye(adj.size(0), dtype=paddle.long, device=adj.
-            device), binarize(adj + paddle.eye(adj.size(0), dtype=paddle.
-            long, device=adj.device))]
-        for i in range(2, order + 1):
-            adj_mats.append(binarize(adj_mats[i - 1] @ adj_mats[1]))
-        order_mat = paddle.zeros_like(adj)
-        for i in range(1, order + 1):
-            order_mat += (adj_mats[i] - adj_mats[i - 1]) * i
-        return order_mat
-    num_types = len(BOND_TYPES)
-    N = num_nodes
-    adj = to_dense_adj(edge_index).squeeze(0)
-    adj_order = get_higher_order_adj_matrix(adj, order)
-    type_mat = to_dense_adj(edge_index, edge_attr=edge_type).squeeze(0)
-    type_highorder = paddle.where(adj_order > 1, num_types + adj_order - 1,
-        paddle.zeros_like(adj_order))
-    assert (type_mat * type_highorder == 0).all()
-    type_new = type_mat + type_highorder
-    new_edge_index, new_edge_type = dense_to_sparse(type_new)
-    _, edge_order = dense_to_sparse(adj_order)
-    new_edge_index, new_edge_type = coalesce(new_edge_index, new_edge_type.
-        long(), N, N)
-    return new_edge_index, new_edge_type
+    coords = paddle.nonzero(hop)
+    edge_hop = paddle.gather_nd(hop, coords)
+    type_mat = to_dense_adj(edge_index, edge_attr=edge_type, max_num_nodes=num_nodes).squeeze(0)
+    direct_type = paddle.gather_nd(type_mat, coords)
+    new_type = paddle.where(edge_hop == 1, direct_type, len(BOND_TYPES) + edge_hop - 1)
+    return coords.transpose([1, 0]), new_type, edge_hop
 
 
 def _extend_to_radius_graph(pos, edge_index, edge_type, cutoff, batch,
     unspecified_type_number=0, is_sidechain=None):
-    assert edge_type.dim() == 1
-    N = pos.size(0)
->>>>>>    bgraph_adj = torch.sparse.LongTensor(edge_index, edge_type, paddle.Size
-        ([N, N]))
+    assert edge_type.ndim == 1
+    N = pos.shape[0]
     if is_sidechain is None:
         rgraph_edge_index = radius_graph(pos, r=cutoff, batch=batch)
     else:
-        is_sidechain = is_sidechain.bool()
-        dummy_index = paddle.arange(pos.size(0), device=pos.device)
+        is_sidechain = is_sidechain.astype(paddle.bool)
+        dummy_index = paddle.arange(N, dtype=paddle.int64, device=pos.place)
         sidechain_pos = pos[is_sidechain]
         sidechain_index = dummy_index[is_sidechain]
         sidechain_batch = batch[is_sidechain]
@@ -180,25 +149,21 @@ def _extend_to_radius_graph(pos, edge_index, edge_type, cutoff, batch,
         r_edge_index_y = sidechain_index[r_edge_index_y]
         rgraph_edge_index1 = paddle.stack((r_edge_index_x, r_edge_index_y))
         rgraph_edge_index2 = paddle.stack((r_edge_index_y, r_edge_index_x))
-        rgraph_edge_index = paddle.cat((rgraph_edge_index1,
-            rgraph_edge_index2), dim=-1)
+        rgraph_edge_index = paddle.concat(
+            (rgraph_edge_index1, rgraph_edge_index2), axis=-1)
         rgraph_edge_index = rgraph_edge_index[:, rgraph_edge_index[0] !=
             rgraph_edge_index[1]]
->>>>>>    rgraph_adj = torch.sparse.LongTensor(rgraph_edge_index, paddle.ones(
-        rgraph_edge_index.size(1)).long().to(pos.device) *
-        unspecified_type_number, paddle.Size([N, N]))
-    composed_adj = (bgraph_adj + rgraph_adj).coalesce()
-    new_edge_index = composed_adj.indices()
-    new_edge_type = composed_adj.values().long()
-    return new_edge_index, new_edge_type
+    radius_type = paddle.full([rgraph_edge_index.shape[1]], unspecified_type_number,
+                              dtype=paddle.int64, device=edge_index.place)
+    return coalesce(paddle.concat((edge_index, rgraph_edge_index), axis=1),
+                    paddle.concat((edge_type.astype(paddle.int64), radius_type)), N, N)
 
 
 def extend_graph_order_radius(num_nodes, pos, edge_index, edge_type, batch,
     order=3, cutoff=10.0, extend_order=True, extend_radius=True,
     is_sidechain=None):
     if extend_order:
-        edge_index, edge_type = _extend_graph_order(num_nodes=num_nodes,
-            edge_index=edge_index, edge_type=edge_type, order=order)
+        edge_index, edge_type, _ = higher_order_edges(num_nodes, edge_index, edge_type, order)
     if extend_radius:
         edge_index, edge_type = _extend_to_radius_graph(pos=pos, edge_index
             =edge_index, edge_type=edge_type, cutoff=cutoff, batch=batch,
@@ -225,18 +190,19 @@ def get_complete_graph(natoms):
         edge_index: (2, N_1 + N_2 + ... + N_{B-1}), where N_i is the number of nodes of the i-th graph.
         num_edges:  (B, ), number of edges per graph.
     """
-    natoms_sqr = (natoms ** 2).long()
+    natoms = natoms.reshape([-1])
+    natoms_sqr = (natoms ** 2).astype(paddle.int64)
     num_atom_pairs = paddle.sum(natoms_sqr)
     natoms_expand = paddle.repeat_interleave(natoms, natoms_sqr)
-    index_offset = paddle.cumsum(natoms, dim=0) - natoms
+    index_offset = paddle.cumsum(natoms, axis=0) - natoms
     index_offset_expand = paddle.repeat_interleave(index_offset, natoms_sqr)
-    index_sqr_offset = paddle.cumsum(natoms_sqr, dim=0) - natoms_sqr
+    index_sqr_offset = paddle.cumsum(natoms_sqr, axis=0) - natoms_sqr
     index_sqr_offset = paddle.repeat_interleave(index_sqr_offset, natoms_sqr)
-    atom_count_sqr = paddle.arange(num_atom_pairs, device=num_atom_pairs.device
-        ) - index_sqr_offset
-    index1 = (atom_count_sqr // natoms_expand).long() + index_offset_expand
-    index2 = (atom_count_sqr % natoms_expand).long() + index_offset_expand
-    edge_index = paddle.cat([index1.view(1, -1), index2.view(1, -1)])
+    atom_count_sqr = paddle.arange(
+        num_atom_pairs, dtype=paddle.int64, device=natoms.place) - index_sqr_offset
+    index1 = atom_count_sqr // natoms_expand + index_offset_expand
+    index2 = atom_count_sqr % natoms_expand + index_offset_expand
+    edge_index = paddle.stack([index1, index2])
     mask = paddle.logical_not(index1 == index2)
     edge_index = edge_index[:, mask]
     num_edges = natoms_sqr - natoms

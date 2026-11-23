@@ -1,10 +1,9 @@
 import paddle
-from torch_scatter import scatter_add, scatter_mean, scatter_max
 from ..common import coarse_grain, batch_to_natoms, get_complete_graph
 from .schnet import SchNetEncoder, GaussianSmearing
 
 
-class CoarseGrainingEncoder(paddle.nn.Module):
+class CoarseGrainingEncoder(paddle.nn.Layer):
 
     def __init__(self, hidden_channels, num_filters, num_interactions,
         edge_channels, cutoff, smooth):
@@ -28,12 +27,11 @@ class CoarseGrainingEncoder(paddle.nn.Module):
             node_attr, subgraph_index, batch)
         edge_index, _ = get_complete_graph(batch_to_natoms(cluster_batch))
         row, col = edge_index
-        edge_length = paddle.norm(cluster_pos[row] - cluster_pos[col], dim=
-            1, p=2)
+        edge_length = paddle.linalg.norm(cluster_pos[row] - cluster_pos[col], p=2, axis=1)
         edge_attr = self.distexp(edge_length)
         h = self.encoder(z=cluster_attr, edge_index=edge_index, edge_length
             =edge_length, edge_attr=edge_attr, embed_node=False)
-        if return_graph:
+        if return_coarse:
             return h, cluster_pos, cluster_attr, cluster_batch, edge_index
         else:
             return h
