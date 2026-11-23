@@ -17,7 +17,7 @@ uv pip install 'setuptools==80.10.1' 'numpy==1.26.4' 'rdkit==2024.9.1' pyyaml ea
 uv pip install https://paddle-whl.cdn.bcebos.com/stable/cu130/paddlepaddle-gpu/paddlepaddle_gpu-3.4.0-cp310-cp310-linux_x86_64.whl
 ```
 
-Do not install Torch or PyG in the Paddle environment. Install `pandas` for the COV/MAT report, `psikit` and its Psi4 backend for property evaluation, or `py3Dmol` for interactive visualization. These are not needed for QM9 training. On WSL, add `/usr/lib/wsl/lib` to `LD_LIBRARY_PATH` if the CUDA driver is not found.
+Do not install Torch or PyG in the Paddle environment. `easydict` is a direct dependency of the Paddle entry scripts (`train.py`, `test.py`, the evaluators and the replay and conversion tools); install it explicitly, as above, because no other package pulls it in. Install `pandas` for the COV/MAT report, `psikit` and its Psi4 backend for property evaluation, or `py3Dmol` for interactive visualization. These are not needed for QM9 training. On WSL, add `/usr/lib/wsl/lib` to `LD_LIBRARY_PATH` if the CUDA driver is not found.
 
 ## Export trusted QM9 assets offline
 
@@ -35,7 +35,13 @@ uv pip install --no-index --no-deps --find-links 'https://data.pyg.org/whl/torch
   'torch-scatter==2.1.2+pt211cu128' 'torch-sparse==0.6.18+pt211cu128' 'torch-cluster==1.6.3+pt211cu128'
 ```
 
-Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. The weight converter imports Paddle next to Torch, so also install the Paddle wheel from [Set up Paddle](#set-up-paddle) into this environment; it runs on CPU. Run the following commands from the repository root in the Torch environment:
+Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. The weight converter imports Paddle next to Torch, so install the CPU Paddle wheel of the same 3.4.0 version into this environment as well. Do not use the CUDA 13 wheel from [Set up Paddle](#set-up-paddle): the Torch cu128 and Paddle cu130 wheels pin conflicting `cuda-toolkit` versions, and the converter runs on CPU anyway.
+
+```bash
+uv pip install --find-links https://www.paddlepaddle.org.cn/packages/stable/cpu/ 'paddlepaddle==3.4.0'
+```
+
+Run the following commands from the repository root in the Torch environment:
 
 ```bash
 python tools/convert_released_weights.py checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.pdparams
@@ -70,6 +76,43 @@ PYTHONPATH=geodiff_paddle python tools/check_paddle_forward.py \
 
 This checks edges, types and masks exactly, and float32 lengths and scores at `atol=1e-5, rtol=1e-4`. It also checks loss and backward on the exported training graphs, without an optimizer step.
 
+
+## Compare one training step with Torch
+
+Both frameworks replay the same recorded step with the released weights and no optimizer update. Each saves the per-atom losses, the edges of its loss forward, the loss mean, the pre-clip gradient norm, one gradient per trained parameter and the names of the parameters without a gradient. The step NPZ comes from the Torch training run started with `--record_inputs`, which writes `inputs/<iteration>.npz` below the run directory. The Torch tool adds `geodiff/` to its own import path.
+
+In the Torch environment on CUDA:
+
+```bash
+python tools/replay_torch_step.py --checkpoint checkpoints/qm9_default.pt \
+  --inputs runs/torch_qm9_smoke/qm9_smoke_2026_11_23__20_27_55_resume/inputs/2865000.npz \
+  --out runs/l1_alignment/torch_step2865000_replay.npz
+```
+
+To export the official conformations of that batch, run the same command with `--checkpoint` and `--out` replaced by `--graphs-source data/QM9/train_data_40k.pkl --graphs-out runs/l1_alignment/step2865000_graphs_official.npz`. It finds each recorded graph in the split by atom types, positions, bond indices and bond types, asserts that atoms, bonds and types equal the recording, and writes them in the layout `graph_data.load_graphs` reads, with the matching dataset positions.
+
+In the Paddle environment:
+
+```bash
+PYTHONPATH=geodiff_paddle python tools/replay_paddle_step.py \
+  --weights runs/paddle_qm9/qm9_default.pdparams \
+  --inputs runs/torch_qm9_smoke/qm9_smoke_2026_11_23__20_27_55_resume/inputs/2865000.npz \
+  --out runs/l1_alignment/paddle_step2865000_replay.npz --device gpu:0
+```
+
+Adding `--graphs-out FILE` here only repacks the recorded arrays in that layout, without reading the dataset. Use the Torch export above when the graphs must come from the official split.
+
+Then compare the two archives with NumPy only, in either environment:
+
+```bash
+python tools/compare_l1_alignment.py \
+  --torch runs/l1_alignment/torch_step2865000_replay.npz \
+  --paddle runs/l1_alignment/paddle_step2865000_replay.npz
+```
+
+Edges, edge types and the local mask must be exactly equal. Losses, both scalars and gradients pass at `atol=1e-4, rtol=1e-3`; the relative error is reported over all entries and over those above `atol`. Both sides must record without a gradient exactly the five `edge_encoder_local.*` tensors, which the forward never calls. The command exits non-zero on any failure.
+
+
 ## Run one training update and resume
 
 In the Paddle environment, make a two-graph batch config and run one update followed by validation:
@@ -98,7 +141,7 @@ The fresh run starts with released model weights and two new Adam optimizers; th
 
 ## Run the tests
 
-In the Paddle environment, install `pytest` with `uv pip install pytest` and run `pytest` from the repository root. The portable reader test needs no Torch or official assets. Set `GEODIFF_TORCH_PYTHON` to the Torch environment's Python executable to include the exporter round-trip. The converter round-trip runs only where the test process imports both Torch and Paddle, as in the conversion environment above. Set `GEODIFF_QM9_SMOKE_ASSETS` to `runs/paddle_qm9` to include the bounded CUDA training and native resume test on the exported two-graph splits and the converted `qm9_default.pdparams`.
+In the Paddle environment, install `pytest` with `uv pip install pytest` and run `pytest` from the repository root. The portable reader, comparator and Paddle replay tests need no Torch or official assets. Set `GEODIFF_TORCH_PYTHON` to an interpreter that imports Torch, as in the conversion environment above, to include the exporter round-trip; when that interpreter also imports Paddle, the converter round-trip runs there too. Without the variable, the converter round-trip runs only if the test process itself imports Torch, and is skipped elsewhere. Set `GEODIFF_QM9_SMOKE_ASSETS` to `runs/paddle_qm9` to include the bounded CUDA training and native resume test on the exported two-graph splits and the converted `qm9_default.pdparams`.
 
 ## Optional sampling and evaluation
 

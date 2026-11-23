@@ -130,6 +130,8 @@ class DualEncoderEpsNetwork(paddle.nn.Layer):
                 return_unreduced_edge_loss, extend_order, extend_radius,
                 is_sidechain, record_inputs=record_inputs, replay=replay)
         elif self.model_type == 'dsm':
+            if replay is not None:
+                raise ValueError('replay is only supported for the diffusion loss')
             return self.get_loss_dsm(atom_type, pos, bond_index, bond_type,
                 batch, num_nodes_per_graph, num_graphs, anneal_power,
                 return_unreduced_loss, return_unreduced_edge_loss,

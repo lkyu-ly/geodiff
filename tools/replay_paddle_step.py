@@ -2,6 +2,9 @@
 
 --inputs is an NPZ written by train.py --record_inputs. The recorded time_step and
 pos_noise are injected, one forward/backward runs and no optimizer steps.
+Gradients are saved as they come out of backward, before the gradient clipping
+whose norm is saved as grad_norm. --graphs-out only repacks the recorded arrays
+in the layout read by graph_data.load_graphs; it does not export the dataset.
 Run with PYTHONPATH=geodiff_paddle from the repository root.
 """
 
@@ -18,6 +21,8 @@ from models.weights import load_released_weights
 
 
 INPUTS = ('atom_type', 'pos', 'bond_index', 'bond_type', 'batch', 'num_nodes_per_graph')
+EDGE_NAMES = ('edge_index', 'edge_type', 'edge_length', 'local_edge_mask')
+GRAD = 'grad::'
 
 
 def dedup_parameters(model):
@@ -35,11 +40,6 @@ def linear_weight_ids(model):
             for name, param in layer.named_parameters(include_sublayers=False) if name.endswith('weight')}
 
 
-def perturbed_pos(model, pos, batch, time_step, pos_noise):
-    a_pos = paddle.gather(paddle.gather(model.alphas, time_step), batch).unsqueeze(-1)
-    return pos + pos_noise * (1.0 - a_pos).sqrt() / a_pos.sqrt()
-
-
 def save_graphs(path, inputs, time_step, pos_noise):
     """Write the batch in the layout read by graph_data.load_graphs."""
     cpu = {key: value.numpy() for key, value in inputs.items()}
@@ -55,12 +55,50 @@ def save_graphs(path, inputs, time_step, pos_noise):
              time_step=time_step, pos_noise=pos_noise)
 
 
+def export_gradients(parameters, transposed):
+    """Return grad:: arrays in Torch layout and the names without a gradient."""
+    out = {}
+    for name, param in parameters.items():
+        if param.grad is not None:
+            # Linear weight gradients are saved transposed, in the [out, in]
+            # layout Torch records; every other array keeps its Paddle layout.
+            grad = param.grad.T if id(param) in transposed else param.grad
+            out[GRAD + name] = grad.numpy()
+    return out, [name for name, param in parameters.items() if param.grad is None]
+
+
+def replay_step(model, inputs, time_step, pos_noise, num_graphs, max_norm=10000.0):
+    """Run one replayed step and return the arrays of the result archive."""
+    edges = {}
+    # The loss forward is the only forward; a post hook keeps its edges.
+    hook = model.register_forward_post_hook(
+        lambda layer, args, output: edges.update(zip(EDGE_NAMES, output[2:])))
+    try:
+        (loss, loss_global, loss_local) = model.get_loss(
+            replay=(time_step, pos_noise), return_unreduced_loss=True, **inputs, num_graphs=num_graphs)
+    finally:
+        hook.remove()
+    loss.mean().backward()
+    parameters = dict(dedup_parameters(model))
+    out = dict(
+        loss=loss.numpy(), loss_global=loss_global.numpy(), loss_local=loss_local.numpy(),
+        loss_mean=np.float64(loss.mean().item()),
+        **{name: value.numpy() for name, value in edges.items()},
+        num_nodes=np.int64(inputs['pos'].shape[0]),
+    )
+    gradients, no_grad = export_gradients(parameters, linear_weight_ids(model))
+    grad_norm = paddle.nn.utils.clip_grad_norm_(list(parameters.values()), max_norm=max_norm)
+    out.update(gradients, grad_norm=np.float64(grad_norm.item()), no_grad=np.array(no_grad))
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--weights', type=Path, required=True, help='native Paddle .pdparams')
     parser.add_argument('--inputs', type=Path, required=True, help='step NPZ from train.py --record_inputs')
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--graphs-out', type=Path, help='optional graph_data-layout NPZ of the batch')
+    parser.add_argument('--graphs-out', type=Path,
+                        help='optional repack of the recorded arrays as a graph_data-layout NPZ')
     parser.add_argument('--device', default='gpu:0')
     args = parser.parse_args()
     paddle.set_device(args.device)
@@ -79,44 +117,18 @@ def main():
         pos_noise = paddle.to_tensor(step['pos_noise'], place=args.device)
         num_graphs = int(step['num_graphs'])
 
-    (loss, loss_global, loss_local) = model.get_loss(
-        replay=(time_step, pos_noise), return_unreduced_loss=True, **inputs, num_graphs=num_graphs)
-    loss.mean().backward()
-    parameters = dict(dedup_parameters(model))
-    grad_norm = paddle.nn.utils.clip_grad_norm_(list(parameters.values()), max_norm=10000.0)
-    pos_perturbed = perturbed_pos(model, inputs['pos'], inputs['batch'], time_step, pos_noise)
-    with paddle.no_grad():
-        (*_, edge_index, edge_type, edge_length, local_edge_mask) = model(
-            atom_type=inputs['atom_type'], batch=inputs['batch'],
-            bond_index=inputs['bond_index'], bond_type=inputs['bond_type'],
-            pos=pos_perturbed, time_step=time_step, return_edges=True)
-
-    out = dict(
-        loss=loss.numpy(), loss_global=loss_global.numpy(), loss_local=loss_local.numpy(),
-        edge_index=edge_index.numpy(), edge_type=edge_type.numpy(),
-        local_edge_mask=local_edge_mask.numpy(), edge_length=edge_length.numpy(),
-        num_nodes=np.int64(inputs['pos'].shape[0]),
-    )
-    no_grad = []
-    # Linear weight gradients are saved transposed, in the [out, in] layout
-    # Torch records; every other array keeps its Paddle layout.
-    transposed = linear_weight_ids(model)
-    for name, param in parameters.items():
-        if param.grad is None:
-            no_grad.append(name)
-        else:
-            grad = param.grad.T if id(param) in transposed else param.grad
-            out[f'grad::{name}'] = grad.numpy()
-    out['no_grad'] = np.array(no_grad)
+    out = replay_step(model, inputs, time_step, pos_noise, num_graphs)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(args.out, **out)
     if args.graphs_out is not None:
         args.graphs_out.parent.mkdir(parents=True, exist_ok=True)
         save_graphs(args.graphs_out, inputs, time_step.numpy(), pos_noise.numpy())
     print(f'Replayed {num_graphs} graphs ({out["num_nodes"]} nodes, {out["edge_type"].shape[0]} edges)')
-    print(f'Loss {loss.mean().item():.17g} | Loss(Global) {loss_global.mean().item():.17g} | '
-          f'Loss(Local) {loss_local.mean().item():.17g} | Grad {grad_norm.item():.17g}')
-    print(f'{len(out) - 9} gradients saved, {len(no_grad)} without gradient: {no_grad}')
+    print(f'Loss {out["loss_mean"]:.17g} | Loss(Global) {out["loss_global"].mean():.17g} | '
+          f'Loss(Local) {out["loss_local"].mean():.17g} | Grad {out["grad_norm"]:.17g}')
+    no_grad = [str(name) for name in out['no_grad']]
+    print(f'{sum(name.startswith(GRAD) for name in out)} gradients saved, '
+          f'{len(no_grad)} without gradient: {no_grad}')
 
 
 if __name__ == '__main__':

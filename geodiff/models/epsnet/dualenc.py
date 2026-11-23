@@ -238,31 +238,36 @@ class DualEncoderEpsNetwork(nn.Module):
     
 
     def get_loss(self, atom_type, pos, bond_index, bond_type, batch, num_nodes_per_graph, num_graphs,
-                 anneal_power=2.0, return_unreduced_loss=False, return_unreduced_edge_loss=False, extend_order=True, extend_radius=True, is_sidechain=None, record_inputs=None):
+                 anneal_power=2.0, return_unreduced_loss=False, return_unreduced_edge_loss=False, extend_order=True, extend_radius=True, is_sidechain=None, record_inputs=None, replay=None):
         if self.model_type == 'diffusion':
             return self.get_loss_diffusion(atom_type, pos, bond_index, bond_type, batch, num_nodes_per_graph, num_graphs,
-                anneal_power, return_unreduced_loss, return_unreduced_edge_loss, extend_order, extend_radius, is_sidechain, record_inputs=record_inputs)
+                anneal_power, return_unreduced_loss, return_unreduced_edge_loss, extend_order, extend_radius, is_sidechain, record_inputs=record_inputs, replay=replay)
         elif self.model_type == 'dsm':
+            if replay is not None:
+                raise ValueError('replay is only supported for the diffusion loss')
             return self.get_loss_dsm(atom_type, pos, bond_index, bond_type, batch, num_nodes_per_graph, num_graphs, 
                 anneal_power, return_unreduced_loss, return_unreduced_edge_loss, extend_order, extend_radius, is_sidechain)
 
 
     def get_loss_diffusion(self, atom_type, pos, bond_index, bond_type, batch, num_nodes_per_graph, num_graphs,
-                 anneal_power=2.0, return_unreduced_loss=False, return_unreduced_edge_loss=False, extend_order=True, extend_radius=True, is_sidechain=None, record_inputs=None):
+                 anneal_power=2.0, return_unreduced_loss=False, return_unreduced_edge_loss=False, extend_order=True, extend_radius=True, is_sidechain=None, record_inputs=None, replay=None):
         N = atom_type.size(0)
         node2graph = batch
 
         # Four elements for DDPM: original_data(pos), gaussian_noise(pos_noise), beta(sigma), time_step
-        # Sample noise levels
-        time_step = torch.randint(
-            0, self.num_timesteps, size=(num_graphs//2+1, ), device=pos.device)
-        time_step = torch.cat(
-            [time_step, self.num_timesteps-time_step-1], dim=0)[:num_graphs]
+        # Sample noise levels, or take the recorded ones of a replayed step
+        if replay is None:
+            time_step = torch.randint(
+                0, self.num_timesteps, size=(num_graphs//2+1, ), device=pos.device)
+            time_step = torch.cat(
+                [time_step, self.num_timesteps-time_step-1], dim=0)[:num_graphs]
+            pos_noise = torch.zeros(size=pos.size(), device=pos.device)
+            pos_noise.normal_()
+        else:
+            time_step, pos_noise = replay
         a = self.alphas.index_select(0, time_step)  # (G, )
         # Perterb pos
         a_pos = a.index_select(0, node2graph).unsqueeze(-1)  # (N, 1)
-        pos_noise = torch.zeros(size=pos.size(), device=pos.device)
-        pos_noise.normal_()
         pos_perturbed = pos + pos_noise * (1.0 - a_pos).sqrt() / a_pos.sqrt()
         if record_inputs is not None:
             record_inputs(time_step, pos_noise)

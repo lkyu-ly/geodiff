@@ -67,7 +67,8 @@ def main():
     parser.add_argument('source', type=Path, help='trusted GeoDiff Torch checkpoint')
     parser.add_argument('target', type=Path, help='native Paddle .pdparams to write')
     args = parser.parse_args()
-    if args.source.resolve() == args.target.resolve():
+    if args.source.resolve() == args.target.resolve() or (
+            args.target.exists() and args.source.samefile(args.target)):
         parser.error('source and target must be different files')
     paddle.set_device('cpu')
     from models.epsnet import get_model
