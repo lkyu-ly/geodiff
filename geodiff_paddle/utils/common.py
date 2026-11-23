@@ -1,32 +1,21 @@
-import paddle
 import copy
-import warnings
-import numpy as np
-from torch_geometric.data import Data, Batch
+
+import paddle
+
+from graph_data import Batch, Data
 
 
-class ExponentialLR_with_minLr(paddle.optimizer.lr.ExponentialDecay):
+class ExponentialLR_with_minLr(paddle.optimizer.lr.LRScheduler):
 
-    def __init__(self, optimizer, gamma, min_lr=0.0001, last_epoch=-1,
-        verbose=False):
+    def __init__(self, learning_rate, gamma, min_lr=0.0001):
         self.gamma = gamma
         self.min_lr = min_lr
-        super(ExponentialLR_with_minLr, self).__init__(optimizer, gamma,
-            last_epoch, verbose)
+        super().__init__(learning_rate)
 
     def get_lr(self):
-        if not self._get_lr_called_within_step:
-            warnings.warn(
-                'To get the last learning rate computed by the scheduler, please use `get_last_lr()`.'
-                , UserWarning)
         if self.last_epoch == 0:
-            return self.base_lrs
-        return [max(group['lr'] * self.gamma, self.min_lr) for group in
-            self.optimizer.param_groups]
-
-    def _get_closed_form_lr(self):
-        return [max(base_lr * self.gamma ** self.last_epoch, self.min_lr) for
-            base_lr in self.base_lrs]
+            return self.base_lr
+        return max(self.base_lr * self.gamma ** self.last_epoch, self.min_lr)
 
 
 def repeat_data(data: Data, num_repeat) ->Batch:
@@ -44,25 +33,23 @@ def repeat_batch(batch: Batch, num_repeat) ->Batch:
 
 def get_optimizer(cfg, model):
     if cfg.type == 'adam':
-        return paddle.optimizer.Adam(parameters=model.parameters(),
-            learning_rate=cfg.lr, weight_decay=cfg.weight_decay, beta1=(cfg
-            .beta1, cfg.beta2)[0], beta2=(cfg.beta1, cfg.beta2)[1])
-    else:
-        raise NotImplementedError('Optimizer not supported: %s' % cfg.type)
+        return paddle.optimizer.Adam(
+            parameters=model.parameters(), learning_rate=cfg.lr,
+            weight_decay=cfg.weight_decay, beta1=cfg.beta1, beta2=cfg.beta2,
+        )
+    raise NotImplementedError('Optimizer not supported: %s' % cfg.type)
 
 
 def get_scheduler(cfg, optimizer):
+    learning_rate = optimizer.get_lr()
     if cfg.type == 'plateau':
-        tmp_lr = paddle.optimizer.lr.ReduceOnPlateau(factor=cfg.factor,
-            patience=cfg.patience, learning_rate=optimizer.get_lr())
-        optimizer.set_lr_scheduler(tmp_lr)
-        return tmp_lr
-    elif cfg.type == 'expmin':
-        return ExponentialLR_with_minLr(optimizer, gamma=cfg.factor, min_lr
-            =cfg.min_lr)
-    elif cfg.type == 'expmin_milestone':
-        gamma = np.exp(np.log(cfg.factor) / cfg.milestone)
-        return ExponentialLR_with_minLr(optimizer, gamma=gamma, min_lr=cfg.
-            min_lr)
+        scheduler = paddle.optimizer.lr.ReduceOnPlateau(
+            factor=cfg.factor, patience=cfg.patience, learning_rate=learning_rate,
+        )
+    elif cfg.type in ('expmin', 'expmin_milestone'):
+        gamma = cfg.factor if cfg.type == 'expmin' else cfg.factor ** (1 / cfg.milestone)
+        scheduler = ExponentialLR_with_minLr(learning_rate, gamma=gamma, min_lr=cfg.min_lr)
     else:
         raise NotImplementedError('Scheduler not supported: %s' % cfg.type)
+    optimizer.set_lr_scheduler(scheduler)
+    return scheduler
