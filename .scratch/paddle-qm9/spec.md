@@ -17,7 +17,7 @@ PaConvert 生成了完整的文件镜像，但还留下不支持的稀疏构造�
 ## 已确认的实现决定
 
 - 依赖来源锁定 Torch 基线的 PyG 1.7.2、torch-scatter 2.1.2、torch-sparse 0.6.18、torch-cluster 1.6.3。先取上游源码，收敛到实际调用函数与下层调用，再对 Python 子集运行 PaConvert。保留来源、许可和本地转换日志；无法转换的 CPU/CUDA 扩展按调用契约用原生 Paddle 重写。运行时通过镜像内本地包导入，不能 fallback 到 Torch；ppmat 可等接入时验证后复用等价组件。
-- 构图对照实际 CUDA：同分子内严格平方距离 `< r²`，按原子索引先取最多 33 个候选再去自环；侧链 raw `radius` 另遵守其 32 候选及反向边逻辑。COO 重复坐标求和、行列升序，类型 0 的边不能删。按目标索引累加，显式保留孤立点。保持 GINE 的注入 MLP、上游局部分支使用全局边编码器以及已确认的非原地 shortcut。
+- 构图对照实际 CUDA wheel `torch-cluster 1.6.3+pt211cu128`：同分子内严格平方距离 `< r²`，先排除同索引，再按源原子索引取至多 32 个候选；不按距离排序。该 wheel 与同名源码标签的「先取 33 个、再去自环」不同。侧链 raw `radius` 不预排自索引，取至多 32 个后映回原索引、补反向边并去自环。COO 重复坐标求和、行列升序，保留类型 0。按目标索引累加，显式保留孤立点。保持 GINE 的注入 MLP、上游局部分支使用全局边编码器以及已确认的非原地 shortcut。
 - 用原生 Paddle Linear，离线仅转置 Linear 的矩阵权重（含方阵），不转置 Embedding 和 bias。严格验 state 键、维度与别名，不用忽略缺失权重的方式通过。保持日程冻结以及 SchNet 的 Embedding max_norm。去掉自动生成的 Paddle Tensor 全局猴补及错误的 NumPy 方法映射。
 - 可信官方 `.pt`、旧 PyG `.pkl` 只在独立 Torch 进程读。模型用键到数值数组的 NPZ，数据用 `atom_type`、`pos`、`edge_index`、`edge_type` 加 `node_ptr`、`edge_ptr` 的 NPZ；需要化学元数据时用可重建同序原子的 RDKit binary 字节与相应偏移（非 Python pickle）、SMILES。Paddle 端用 `allow_pickle=False`。先导出足够冒烟的小批，不改写或提交官方资产。键坐标为单分子局部索引；拼批两行同加节点偏移。
 - 训练使用 Paddle 原生 checkpoint，保留两个 Adam、两个独立调度器和一次全模型梯度裁剪、逐 step 的原有全部指标和可调间隔，不生成 TensorBoard。测试可以从发布权重和**新建**双 Adam 起步；仅标为同权重冒烟。保存和重载此 Paddle 状态，再证实原生断点可继续。历史 Torch 权重不由 Paddle 加载 pickle。
