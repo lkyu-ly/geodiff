@@ -5,9 +5,7 @@ import random
 import logging
 import numpy as np
 from glob import glob
-from logging import Logger
-from tqdm.auto import tqdm
-from torch_geometric.data import Batch
+from graph_data import Batch
 
 
 class BlackHole(object):
@@ -51,7 +49,7 @@ def get_new_log_dir(root='./logs', prefix='', tag=''):
 
 
 def seed_all(seed):
-    paddle.manual_seed(seed)
+    paddle.seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
@@ -80,10 +78,9 @@ def repeat_data(data, num_repeat):
 
 def repeat_batch(batch, num_repeat):
     datas = batch.to_data_list()
-    new_data = []
-    for i in range(num_repeat):
-        new_data += datas.clone()
-    return Batch.from_data_list(new_data)
+    return Batch.from_data_list([
+        data.clone() for _ in range(num_repeat) for data in datas
+    ])
 
 
 def get_checkpoint_path(folder, it=None):
