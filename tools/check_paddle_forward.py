@@ -1,5 +1,6 @@
 """Replay released QM9 weights and reference NPZs with Paddle only.
 
+--weights is the native .pdparams written by tools/convert_released_weights.py.
 Run with PYTHONPATH=geodiff_paddle from the repository root.
 """
 
@@ -24,7 +25,7 @@ OUTPUTS = ('edge_inv_global', 'edge_inv_local', 'edge_index', 'edge_type', 'edge
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--forward', type=Path, required=True)
-    parser.add_argument('--weights', type=Path, required=True)
+    parser.add_argument('--weights', type=Path, required=True, help='native Paddle .pdparams')
     parser.add_argument('--val-graph', type=Path, required=True)
     parser.add_argument('--train', type=Path, required=True)
     parser.add_argument('--device', default='gpu:0')
@@ -40,9 +41,9 @@ def main():
     load_released_weights(model, args.weights)
     state = model.state_dict()
     assert len(state) == 198 and len({id(tensor) for tensor in state.values()}) == 100
-    with np.load(args.weights, allow_pickle=False) as weights:
-        for key, value in state.items():
-            np.testing.assert_array_equal(value.numpy(), weights[key], err_msg=key)
+    weights = paddle.load(str(args.weights))
+    for key, value in state.items():
+        np.testing.assert_array_equal(value.numpy(), weights[key].numpy(), err_msg=key)
     print('Loaded 198 exact state entries (98 shared aliases)')
     model.eval()
     with paddle.no_grad(), np.load(args.forward, allow_pickle=False) as ref:

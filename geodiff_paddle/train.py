@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--resume_iter', type=int, default=None)
     parser.add_argument('--logdir', type=str, default='./logs')
-    parser.add_argument('--weights', type=Path, help='Released weights exported to NPZ (fresh runs only).')
+    parser.add_argument('--weights', type=Path, help='Released native .pdparams weights (fresh runs only).')
     parser.add_argument('--max_iters', type=int, help='Override the last training iteration.')
     parser.add_argument('--log_interval', type=int, default=1, help=
         'Log the first training update and every N updates thereafter.')

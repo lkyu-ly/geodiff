@@ -47,8 +47,9 @@ def set_model_state(model, state):
 
 
 def load_released_weights(model, path):
-    """Load an offline-exported NPZ; its Linear weights are already transposed."""
-    with np.load(path, allow_pickle=False) as archive:
-        if len(archive.files) != len(set(archive.files)):
-            raise ValueError('Duplicate model state keys in NPZ')
-        set_model_state(model, archive)
+    """Load a native .pdparams release file; its Linear weights are already transposed.
+
+    The file holds the model state only. Keys, shapes, dtypes and shared aliases
+    are validated before any model tensor is updated.
+    """
+    set_model_state(model, paddle.load(str(path)))

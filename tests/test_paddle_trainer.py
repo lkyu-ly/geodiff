@@ -52,7 +52,7 @@ def test_qm9_native_checkpoint_resumes_both_adam_updates(tmp_path):
     if not asset_dir:
         pytest.skip('Set GEODIFF_QM9_SMOKE_ASSETS to the exported official smoke assets')
     assets = Path(asset_dir).resolve()
-    weights_path = assets / 'qm9_default.npz'
+    weights_path = assets / 'qm9_default.pdparams'
     config = yaml.safe_load((ROOT / 'geodiff_paddle/configs/qm9_default.yml').read_text())
     config['dataset'].update(
         train=os.path.relpath(assets / 'train_2.npz', ROOT),
@@ -81,35 +81,35 @@ def test_qm9_native_checkpoint_resumes_both_adam_updates(tmp_path):
         assert type(state['config']) is type(state['config']['train']) is dict
         assert state['avg_val_loss'] == metrics[0]
 
-    with np.load(weights_path, allow_pickle=False) as weights:
-        for branch, metric_index in (('global', 1), ('local', 2)):
-            first_opt = first[f'optimizer_{branch}']
-            resumed_opt = resumed[f'optimizer_{branch}']
-            first_scheduler = first_opt['LR_Scheduler']
-            resumed_scheduler = resumed_opt['LR_Scheduler']
-            assert first_scheduler['best'] == first_metrics[metric_index]
-            best, current = first_metrics[metric_index], resume_metrics[metric_index]
-            assert resumed_scheduler['best'] == (current if current < best * (1 - 1e-4) else best)
-            assert resumed_scheduler['last_epoch'] == first_scheduler['last_epoch'] + 1
+    weights = paddle.load(str(weights_path))
+    for branch, metric_index in (('global', 1), ('local', 2)):
+        first_opt = first[f'optimizer_{branch}']
+        resumed_opt = resumed[f'optimizer_{branch}']
+        first_scheduler = first_opt['LR_Scheduler']
+        resumed_scheduler = resumed_opt['LR_Scheduler']
+        assert first_scheduler['best'] == first_metrics[metric_index]
+        best, current = first_metrics[metric_index], resume_metrics[metric_index]
+        assert resumed_scheduler['best'] == (current if current < best * (1 - 1e-4) else best)
+        assert resumed_scheduler['last_epoch'] == first_scheduler['last_epoch'] + 1
 
-            keys = [key for key in weights.files if key.startswith(f'model_{branch}.')]
-            assert any(not np.array_equal(weights[key], first['model'][key].numpy()) for key in keys)
-            assert any(not np.array_equal(first['model'][key].numpy(), resumed['model'][key].numpy())
-                       for key in keys)
+        keys = [key for key in weights if key.startswith(f'model_{branch}.')]
+        assert any(not np.array_equal(weights[key].numpy(), first['model'][key].numpy()) for key in keys)
+        assert any(not np.array_equal(first['model'][key].numpy(), resumed['model'][key].numpy())
+                   for key in keys)
 
-            for name in ('moment1', 'moment2', 'beta1_pow_acc', 'beta2_pow_acc'):
-                keys = [key for key in first_opt if f'_{name}_' in key]
-                assert keys, name
-                before = [first_opt[key].numpy() for key in keys]
-                after = [resumed_opt[key].numpy() for key in keys]
-                if name.startswith('beta'):
-                    beta = first['config']['train']['optimizer'][name.split('_')[0]]
-                    for old, new in zip(before, after):
-                        np.testing.assert_allclose(old, beta ** 2, rtol=1e-6)
-                        np.testing.assert_allclose(new, old * beta, rtol=1e-6)
-                else:
-                    assert any(np.any(value) for value in before)
-                    assert any(not np.array_equal(old, new) for old, new in zip(before, after))
+        for name in ('moment1', 'moment2', 'beta1_pow_acc', 'beta2_pow_acc'):
+            keys = [key for key in first_opt if f'_{name}_' in key]
+            assert keys, name
+            before = [first_opt[key].numpy() for key in keys]
+            after = [resumed_opt[key].numpy() for key in keys]
+            if name.startswith('beta'):
+                beta = first['config']['train']['optimizer'][name.split('_')[0]]
+                for old, new in zip(before, after):
+                    np.testing.assert_allclose(old, beta ** 2, rtol=1e-6)
+                    np.testing.assert_allclose(new, old * beta, rtol=1e-6)
+            else:
+                assert any(np.any(value) for value in before)
+                assert any(not np.array_equal(old, new) for old, new in zip(before, after))
 
 
 @pytest.mark.parametrize(('kind', 'factor', 'milestone'), [

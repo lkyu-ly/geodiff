@@ -32,8 +32,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('ckpt', nargs='?', type=Path, help='trusted native Paddle .pdckpt')
-    source.add_argument('--weights', type=Path, help='released weights exported to NPZ')
-    parser.add_argument('--config', type=Path, help='model and dataset YAML (default for NPZ: QM9)')
+    source.add_argument('--weights', type=Path, help='released weights as native .pdparams')
+    parser.add_argument('--config', type=Path, help='model and dataset YAML (default for .pdparams: QM9)')
     parser.add_argument('--save_traj', action='store_true', default=False,
         help='whether store the whole trajectory for sampling')
     parser.add_argument('--resume', type=str, help='trusted local sampling results .pkl')
@@ -59,7 +59,7 @@ if __name__ == '__main__':
         'weight for DDIM and DDPM: 0->DDIM, 1->DDPM')
     args = parser.parse_args()
     if args.ckpt is not None and args.ckpt.suffix != '.pdckpt':
-        parser.error('expected a native .pdckpt; export released weights and use --weights instead')
+        parser.error('expected a native .pdckpt; use --weights with released .pdparams instead')
     if args.device.startswith('cuda'):
         args.device = 'gpu' + args.device[4:]
     paddle.set_device(args.device)

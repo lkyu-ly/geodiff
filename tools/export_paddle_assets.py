@@ -1,4 +1,4 @@
-"""Export trusted GeoDiff Torch assets to compressed NPZ (offline, CPU only)."""
+"""Export trusted GeoDiff graph datasets to compressed NPZ (offline, CPU only)."""
 
 import argparse
 from io import BytesIO
@@ -114,53 +114,21 @@ def _graph_arrays(path, limit):
     return result
 
 
-def _weight_arrays(path):
-    from models.epsnet import get_model
-
-    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-    state = checkpoint['model']
-    # Build a separate CPU model only to identify module types, shapes and aliases.
-    # Values in the archive always come directly from the checkpoint.
-    with torch.device('cpu'), torch.no_grad():
-        model = get_model(checkpoint['config'].model)
-    template = model.state_dict(keep_vars=True)
-    if template.keys() != state.keys():
-        raise ValueError(f'Model key mismatch: missing={template.keys() - state.keys()}, '
-                         f'extra={state.keys() - template.keys()}')
-    linear_weights = {id(module.weight) for module in model.modules()
-                      if isinstance(module, torch.nn.Linear)}
-    result, aliases = {}, {}
-    for key, tensor in state.items():
-        original = template[key]
-        if tensor.shape != original.shape:
-            raise ValueError(f'{key}: expected shape {original.shape}, got {tensor.shape}')
-        identity = id(original)
-        previous = aliases.setdefault(identity, key)
-        if previous != key and not torch.equal(state[previous], tensor):
-            raise ValueError(f'Inconsistent checkpoint aliases: {previous} and {key}')
-        array = _array(tensor)
-        result[key] = array.T if identity in linear_weights else array
-    return result
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='kind', required=True)
     graphs = commands.add_parser('graphs', help='export a trusted PyG graph-list pickle')
-    weights = commands.add_parser('weights', help='export a trusted GeoDiff checkpoint')
-    for command in (graphs, weights):
-        command.add_argument('source', type=Path)
-        command.add_argument('target', type=Path)
+    graphs.add_argument('source', type=Path)
+    graphs.add_argument('target', type=Path)
     graphs.add_argument('--limit', type=int, help='export only the first N graphs')
     args = parser.parse_args()
-    if args.kind == 'graphs' and args.limit is not None and args.limit < 1:
+    if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive')
     if args.source.resolve() == args.target.resolve() or (
             args.target.exists() and args.source.samefile(args.target)):
         parser.error('source and target must be different files')
     sys.path.insert(0, str(TORCH_ROOT))
-    arrays = (_graph_arrays(args.source, args.limit) if args.kind == 'graphs'
-              else _weight_arrays(args.source))
+    arrays = _graph_arrays(args.source, args.limit)
     args.target.parent.mkdir(parents=True, exist_ok=True)
     with args.target.open('wb') as output:
         np.savez_compressed(output, **arrays)

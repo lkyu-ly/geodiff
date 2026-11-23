@@ -32,7 +32,6 @@ NetworkX graph from edge_index with to_networkx when needed.
 
 At repository root, in the trusted Torch reference environment with PyG
 1.7.2 available:
-  python tools/export_paddle_assets.py weights checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.npz
   python tools/export_paddle_assets.py graphs data/QM9/train_data_40k.pkl runs/paddle_qm9/train_2.npz --limit 2
   python tools/export_paddle_assets.py graphs data/QM9/val_data_5k.pkl runs/paddle_qm9/val_2.npz --limit 2
 

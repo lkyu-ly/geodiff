@@ -35,15 +35,15 @@ uv pip install --no-index --no-deps --find-links 'https://data.pyg.org/whl/torch
   'torch-scatter==2.1.2+pt211cu128' 'torch-sparse==0.6.18+pt211cu128' 'torch-cluster==1.6.3+pt211cu128'
 ```
 
-Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. Run the following commands from the repository root in the Torch environment:
+Place the [released checkpoint and preprocessed GEOM splits](https://drive.google.com/drive/folders/1b0kNBtck9VNrLRZxg6mckyVUpJA5rBHh?usp=sharing) at `checkpoints/qm9_default.pt` and `data/QM9/*.pkl`. The weight converter imports Paddle next to Torch, so also install the Paddle wheel from [Set up Paddle](#set-up-paddle) into this environment; it runs on CPU. Run the following commands from the repository root in the Torch environment:
 
 ```bash
-python tools/export_paddle_assets.py weights checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.npz
+python tools/convert_released_weights.py checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.pdparams
 python tools/export_paddle_assets.py graphs data/QM9/train_data_40k.pkl runs/paddle_qm9/train_2.npz --limit 2
 python tools/export_paddle_assets.py graphs data/QM9/val_data_5k.pkl runs/paddle_qm9/val_2.npz --limit 2
 ```
 
-The exporter reads trusted files only, runs on CPU, and leaves the originals unchanged. The weights NPZ contains model weights in Paddle layout, not Adam or scheduler state. Graph NPZs keep graph order, molecule-local edge indices, and available SMILES and RDKit molecule data. Paddle reads those archives without pickle. For a complete split, omit `--limit` and write the corresponding NPZ at the path listed in the config.
+Both tools read trusted files only, run on CPU, and leave the originals unchanged. The `.pdparams` holds the model weights in Paddle layout and nothing else: no config, iteration, Adam or scheduler state. The converter transposes Linear weights only and checks every saved entry against the checkpoint; Paddle loads the file with `paddle.load`. Graph NPZs keep graph order, molecule-local edge indices, and available SMILES and RDKit molecule data. Paddle reads those archives without pickle. For a complete split, omit `--limit` and write the corresponding NPZ at the path listed in the config.
 
 ## Compare fixed QM9 forward outputs
 
@@ -64,7 +64,7 @@ Return to the Paddle environment and check the archives:
 PYTHONPATH=geodiff_paddle python tools/check_paddle_forward.py \
   --forward runs/paddle_qm9/recreated/forward.npz \
   --val-graph runs/paddle_qm9/recreated/val_first_graph.npz \
-  --weights runs/paddle_qm9/qm9_default.npz \
+  --weights runs/paddle_qm9/qm9_default.pdparams \
   --train runs/paddle_qm9/train_2.npz --device gpu:0
 ```
 
@@ -86,7 +86,7 @@ Path('runs/paddle_qm9/qm9_smoke.yml').write_text(yaml.safe_dump(cfg, sort_keys=F
 PY
 
 python geodiff_paddle/train.py runs/paddle_qm9/qm9_smoke.yml \
-  --device gpu:0 --weights runs/paddle_qm9/qm9_default.npz \
+  --device gpu:0 --weights runs/paddle_qm9/qm9_default.pdparams \
   --max_iters 1 --val_batches 1 --logdir runs/paddle_qm9/train
 
 run=$(ls -dt runs/paddle_qm9/train/qm9_smoke_* | head -n 1)
@@ -98,7 +98,7 @@ The fresh run starts with released model weights and two new Adam optimizers; th
 
 ## Run the tests
 
-In the Paddle environment, install `pytest` with `uv pip install pytest` and run `pytest` from the repository root. The portable reader test needs no Torch or official assets. Set `GEODIFF_TORCH_PYTHON` to the Torch environment's Python executable to include the exporter round-trip. Set `GEODIFF_QM9_SMOKE_ASSETS` to `runs/paddle_qm9` to include the bounded CUDA training and native resume test on the exported two-graph splits.
+In the Paddle environment, install `pytest` with `uv pip install pytest` and run `pytest` from the repository root. The portable reader test needs no Torch or official assets. Set `GEODIFF_TORCH_PYTHON` to the Torch environment's Python executable to include the exporter round-trip. The converter round-trip runs only where the test process imports both Torch and Paddle, as in the conversion environment above. Set `GEODIFF_QM9_SMOKE_ASSETS` to `runs/paddle_qm9` to include the bounded CUDA training and native resume test on the exported two-graph splits and the converted `qm9_default.pdparams`.
 
 ## Optional sampling and evaluation
 
@@ -109,14 +109,14 @@ python tools/export_paddle_assets.py graphs data/QM9/test_data_1k.pkl data/QM9/t
 python tools/export_paddle_assets.py graphs data/QM9/qm9_property.pkl data/QM9/qm9_property.npz
 ```
 
-In the Paddle environment, sample with released weights or replace `--weights FILE.npz` with a trusted native positional `ITER.pdckpt`. NPZ weights use the QM9 config by default; `--config` selects a different YAML. Native checkpoints use their embedded config unless overridden. `--test_set` overrides the dataset path; use the property NPZ there for property evaluation.
+In the Paddle environment, sample with released weights or replace `--weights FILE.pdparams` with a trusted native positional `ITER.pdckpt`. Released weights use the QM9 config by default; `--config` selects a different YAML. Native checkpoints use their embedded config unless overridden. `--test_set` overrides the dataset path; use the property NPZ there for property evaluation.
 
 ```bash
-python geodiff_paddle/test.py --weights runs/paddle_qm9/qm9_default.npz \
+python geodiff_paddle/test.py --weights runs/paddle_qm9/qm9_default.pdparams \
   --start_idx 0 --end_idx 5 --out_dir runs/paddle_qm9/sample
 python geodiff_paddle/eval_covmat.py.py runs/paddle_qm9/sample/samples_all.pkl
 
-python geodiff_paddle/test.py --weights runs/paddle_qm9/qm9_default.npz \
+python geodiff_paddle/test.py --weights runs/paddle_qm9/qm9_default.pdparams \
   --test_set data/QM9/qm9_property.npz --num_confs 50 \
   --start_idx 0 --end_idx 5 --out_dir runs/paddle_qm9/property
 python geodiff_paddle/eval_prop.py --dataset data/QM9/qm9_property.npz \

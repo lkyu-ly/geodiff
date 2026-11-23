@@ -73,16 +73,40 @@ class AliasedLayers(nn.Layer):
         self.alias = self.lin
 
 
-def test_native_npz_loads_without_transposing(tmp_path):
+def released_state():
+    weight = paddle.to_tensor([[2.], [3.]])
+    bias = paddle.to_tensor([1.])
+    return {'lin.weight': weight, 'lin.bias': bias, 'alias.weight': weight, 'alias.bias': bias}
+
+
+def test_released_pdparams_loads_with_linears_already_transposed(tmp_path):
     from models.weights import load_released_weights
 
     model = AliasedLayers()
-    weight = np.array([[2.], [3.]], dtype=np.float32)
-    bias = np.array([1.], dtype=np.float32)
-    path = tmp_path / 'weights.npz'
-    np.savez(path, **{'lin.weight': weight, 'lin.bias': bias, 'alias.weight': weight, 'alias.bias': bias})
+    path = tmp_path / 'weights.pdparams'
+    paddle.save(released_state(), str(path))
     load_released_weights(model, path)
     np.testing.assert_array_equal(model.lin(paddle.to_tensor([[5., 7.]])).numpy(), [[32.]])
+
+
+@pytest.mark.parametrize('kind', ['npz', 'missing_key'])
+def test_released_weights_reject_unusable_files_before_updating_model(kind, tmp_path):
+    from models.weights import load_released_weights
+
+    model = AliasedLayers()
+    snapshot = {key: tensor.numpy().copy() for key, tensor in model.state_dict().items()}
+    state = released_state()
+    if kind == 'npz':
+        path = tmp_path / 'weights.npz'
+        np.savez(path, **{key: value.numpy() for key, value in state.items()})
+    else:
+        path = tmp_path / 'weights.pdparams'
+        del state['alias.bias']
+        paddle.save(state, str(path))
+    with pytest.raises(ValueError, match='can not parse' if kind == 'npz' else 'missing'):
+        load_released_weights(model, path)
+    for key, actual in model.state_dict().items():
+        np.testing.assert_array_equal(actual.numpy(), snapshot[key])
 
 
 @pytest.mark.parametrize('defect', ['keys', 'shape', 'dtype', 'alias'])
