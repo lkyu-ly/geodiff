@@ -1,0 +1,42 @@
+Source: PyTorch Geometric 1.7.2, MIT (see LICENSE).
+Archive: https://codeload.github.com/pyg-team/pytorch_geometric/tar.gz/refs/tags/1.7.2
+
+Function-level conversion (PaConvert 3.3.1):
+  paconvert -i trimmed -o converted --show_unsupport_api --no_format
+The full archive, trimmed Python definitions, conversion output and log are
+local experiment artifacts under runs/third_party_qm9/02/ (not tracked).
+The converter reported 59/59 recognized Torch APIs; that does not mean the
+generated Python is runnable without compatibility changes.
+
+  torch_geometric/data/data.py -> data.py: Data field access and iteration,
+    __cat_dim__, __inc__, num_nodes, num_edges, clone, to/cpu/cuda. Preserve the
+    subclass hooks, omit sparse and debug branches, use atom_type/pos before
+    edge inference, and use native Paddle Tensor clone and device transfer.
+  torch_geometric/data/batch.py -> data.py: Batch.from_data_list, get_example,
+    to_data_list, num_graphs. Preserve the per-field concatenation axis,
+    cumulative increments and inverse slices. Omit SparseTensor and unused
+    follow_batch/exclude_keys paths. Non-tensor metadata stays per-graph.
+  torch_geometric/transforms/compose.py -> __init__.py: Compose constructor,
+    ordered transform call and representation; no external runtime imports.
+  torch_geometric/utils/convert.py -> __init__.py: to_networkx; preserve the
+    undirected triangle filter and isolated nodes, replace .t() with native
+    Paddle transpose, and read only requested attributes without dropping
+    the leading node/edge dimension for singleton graphs.
+
+Archive layout: node_ptr and edge_ptr delimit atom_type/pos and
+edge_index/edge_type respectively; edge coordinates remain molecule-local.
+Optional fixed-shape arrays idx, totalenergy and boltzmannweight are per
+molecule, as is the Unicode smiles array. rdmol_ptr delimits uint8 rdmol_data
+(RDKit binary). The unused upstream nx object is not serialized. Rebuild a
+NetworkX graph from edge_index with to_networkx when needed.
+
+At repository root, in the trusted Torch reference environment with PyG
+1.7.2 available:
+  python tools/export_paddle_assets.py weights checkpoints/qm9_default.pt runs/paddle_qm9/qm9_default.npz
+  python tools/export_paddle_assets.py graphs data/QM9/train_data_40k.pkl runs/paddle_qm9/train_2.npz --limit 2
+  python tools/export_paddle_assets.py graphs data/QM9/val_data_5k.pkl runs/paddle_qm9/val_2.npz --limit 2
+
+In Paddle, import load_graphs, GraphDataset, GraphDataLoader and
+collate_graphs from geodiff_paddle.graph_data. GraphDataLoader wraps Paddle's
+tensor transport and yields Batch objects; collate_graphs also batches a
+plain list without a loader. Archives with molecules require RDKit to read.
