@@ -1,5 +1,6 @@
-"""Run the CPU commands against small flat-batch and trajectory fixtures."""
+"""Exercise the parity commands with small CPU fixtures."""
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -63,10 +64,34 @@ def trajectory():
                  grad_norm=124.5, lr_global=0.001, lr_local=0.001) for i in range(1, 21)]
 
 
-def compare(tmp_path, torch_steps, paddle_steps):
+def tiny_tape():
+    return dict(
+        num_graphs=np.array(1, dtype=np.int64),
+        num_nodes_per_graph=np.array([3], dtype=np.int64),
+        batch=np.array([0, 0, 0], dtype=np.int64),
+        atom_type=np.array([6, 8, 6], dtype=np.int64),
+        pos=np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0]], dtype=np.float32),
+        bond_index=np.array([[0, 1], [1, 0]], dtype=np.int64),
+        bond_type=np.array([1, 1], dtype=np.int64),
+        time_step=np.full((20, 1), 100, dtype=np.int64),
+        pos_noise=np.zeros((20, 3, 3), dtype=np.float32),
+    )
+
+
+def compare(tmp_path, torch_steps, paddle_steps, *, swapped=False, different_field=None):
     torch, paddle, output = (tmp_path / f'{name}.json' for name in ('torch', 'paddle', 'out'))
-    torch.write_text(json.dumps(torch_steps))
-    paddle.write_text(json.dumps(paddle_steps))
+    for path, backend, steps in ((torch, 'torch', torch_steps), (paddle, 'paddle', paddle_steps)):
+        arrays = tiny_tape()
+        if backend == 'paddle' and different_field is not None:
+            if different_field == 'pos_noise':
+                arrays[different_field][-1, 0, 0] = -0.0
+            else:
+                arrays[different_field].flat[0] += 1
+        sidecar = path.with_name(path.name + '.inputs.npz')
+        np.savez(sidecar, **arrays)
+        path.write_text(json.dumps(dict(backend=backend, inputs=sidecar.name, steps=steps)))
+    if swapped:
+        torch, paddle = paddle, torch
     result = run('compare', '--torch', torch, '--paddle', paddle, '--out', output)
     return result, json.loads(output.read_text()) if output.exists() else None
 
@@ -120,6 +145,73 @@ def test_compare_uses_float64_and_applies_the_relative_error_floor(tmp_path):
     assert result.returncode == 0, result.stderr
     assert out['steps'][0]['delta']['loss'] == 2 ** -49
     assert out['steps'][1]['rel_error']['loss'] == pytest.approx(0.01)
+
+
+def test_compare_refuses_swapped_backend_files(tmp_path):
+    result, out = compare(tmp_path, trajectory(), trajectory(), swapped=True)
+
+    assert result.returncode == 2
+    assert 'backend' in result.stderr and 'torch' in result.stderr
+    assert out is None
+
+
+@pytest.mark.parametrize('field', ['pos', 'time_step', 'pos_noise'])
+def test_compare_refuses_same_shape_tapes_with_different_bytes(tmp_path, field):
+    result, out = compare(tmp_path, trajectory(), trajectory(), different_field=field)
+
+    assert result.returncode == 2
+    assert 'input tape' in result.stderr and field in result.stderr
+    assert out is None
+
+
+@pytest.mark.skipif(importlib.util.find_spec('paddle') is None, reason='requires native Paddle')
+def test_paddle_cpu_runner_updates_both_optimizer_groups(tmp_path):
+    arrays = tiny_tape()
+    tape, weights, output = (tmp_path / name for name in ('tape.npz', 'tiny.pdparams', 'rows.json'))
+    np.savez(tape, **arrays, unused=np.arange(64))
+    # With only the two final biases nonzero, each branch depends on its own
+    # group alone. The three atoms give one bond and two radius-only pairs.
+    root = TOOL.parents[1] / 'geodiff_paddle'
+    make_weights = """
+import sys
+from pathlib import Path
+import paddle
+import yaml
+from easydict import EasyDict
+
+sys.path.insert(0, sys.argv[1])
+from models.epsnet import get_model
+
+paddle.set_device('cpu')
+config = EasyDict(yaml.safe_load((Path(sys.argv[1]) / 'configs/qm9_default.yml').read_text()))
+model = get_model(config.model)
+with paddle.no_grad():
+    for parameter in model.parameters():
+        parameter.set_value(paddle.zeros_like(parameter))
+    model.grad_global_dist_mlp.layers[-1].bias.set_value(paddle.full([1], 0.75))
+    model.grad_local_dist_mlp.layers[-1].bias.set_value(paddle.full([1], 0.375))
+paddle.save(model.state_dict(), sys.argv[2])
+"""
+    fixture = subprocess.run([sys.executable, '-c', make_weights, str(root), str(weights)],
+                             capture_output=True, text=True, check=False)
+    assert fixture.returncode == 0, fixture.stderr
+
+    result = run('paddle', '--device', 'cpu', '--inputs', tape, '--weights', weights, '--out', output)
+    assert result.returncode == 0, result.stderr
+    archive = json.loads(output.read_text())
+    assert archive['backend'] == 'paddle'
+    with np.load(output.with_name(archive['inputs']), allow_pickle=False) as snapshot:
+        assert set(snapshot.files) == arrays.keys()
+        for name, original in arrays.items():
+            assert snapshot[name].dtype == original.dtype and snapshot[name].shape == original.shape, name
+            assert snapshot[name].tobytes() == original.tobytes(), name
+    rows = archive['steps']
+    assert [row['step'] for row in rows] == list(range(1, 21))
+    assert rows[0]['loss_global'] == pytest.approx((32 + 8 * np.sqrt(2)) / 3 * 0.75 ** 2)
+    assert rows[0]['loss_local'] == pytest.approx(40 / 3 * 0.375 ** 2)
+    # Three pre-update rows with identical input reveal the first two updates.
+    for field in ('loss_global', 'loss_local'):
+        assert rows[0][field] > rows[1][field] > rows[2][field], field
 
 
 @pytest.mark.parametrize('bad_rows, field', [

@@ -25,6 +25,8 @@ OUTPUTS = ('edge_inv_global', 'edge_inv_local', 'edge_index', 'edge_type', 'edge
 def error_metrics(actual, expected):
     actual = np.asarray(actual, dtype=np.float64)
     expected = np.asarray(expected, dtype=np.float64)
+    if not np.isfinite(actual).all() or not np.isfinite(expected).all():
+        raise ValueError('forward output and reference must be finite')
     error = np.abs(actual - expected)
     denominator = np.maximum(np.maximum(np.abs(actual), np.abs(expected)), 1e-30)
     return {'max_abs': error.max(), 'mean_abs': error.mean(), 'mean_rel': (error / denominator).mean()}

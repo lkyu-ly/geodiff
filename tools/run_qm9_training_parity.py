@@ -2,6 +2,7 @@
 
 Run Torch and Paddle in separate processes with their native environments.
 Prepare and compare need only NumPy. Output files must not already exist.
+Each backend saves its step JSON and a sibling NPZ of the arrays it consumed.
 """
 
 import argparse
@@ -61,7 +62,14 @@ def prepare(inputs, out):
         np.savez(file, **arrays)
 
 
+def tape_snapshot_path(path):
+    return path.with_name(path.name + '.inputs.npz')
+
+
 def run_training(args):
+    snapshot = tape_snapshot_path(args.out)
+    if snapshot.exists() or snapshot.is_symlink():
+        raise FileExistsError(f'output already exists: {snapshot}')
     arrays = load_inputs(args.inputs, taped=True)
     is_torch = args.command == 'torch'
     backend_root = ROOT / ('geodiff' if is_torch else 'geodiff_paddle')
@@ -138,12 +146,21 @@ def run_training(args):
         rows.append(row)
         print(f'{args.command} step {i + 1:02d} | '
               + ' | '.join(f'{name}={row[name]:.17g}' for name in STEP_FIELDS), flush=True)
-    write_json(args.out, rows)
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    with snapshot.open('xb') as file:
+        np.savez(file, **arrays)
+    write_json(args.out, dict(backend=args.command, inputs=snapshot.name, steps=rows))
 
 
-def read_steps(path, side):
+def read_trajectory(path, side):
     with path.open() as file:
-        rows = json.load(file)
+        archive = json.load(file)
+    if not isinstance(archive, dict) or archive.get('backend') != side:
+        raise ValueError(f'{side}: expected backend {side!r} in {path}')
+    snapshot = tape_snapshot_path(path)
+    if archive.get('inputs') != snapshot.name:
+        raise ValueError(f'{side}: expected input tape {snapshot.name!r} in {path}')
+    rows = archive.get('steps')
     if not isinstance(rows, list) or len(rows) != STEPS:
         raise ValueError(f'{side}: expected exactly {STEPS} step records')
     for step, row in enumerate(rows, start=1):
@@ -153,11 +170,18 @@ def read_steps(path, side):
             value = row.get(name)
             if type(value) not in (int, float) or not np.isfinite(float(value)):
                 raise ValueError(f'{side} step {step}: {name} must be a finite number')
-    return rows
+    return rows, load_inputs(snapshot, taped=True)
 
 
 def compare(torch_path, paddle_path):
-    torch, paddle = read_steps(torch_path, 'torch'), read_steps(paddle_path, 'paddle')
+    torch, torch_inputs = read_trajectory(torch_path, 'torch')
+    paddle, paddle_inputs = read_trajectory(paddle_path, 'paddle')
+    for name, reference_array in torch_inputs.items():
+        actual_array = paddle_inputs[name]
+        # Compare bytes, not floating-point equality (which equates signed zero).
+        if (actual_array.dtype != reference_array.dtype or actual_array.shape != reference_array.shape
+                or not np.array_equal(actual_array.ravel().view(np.uint8), reference_array.ravel().view(np.uint8))):
+            raise ValueError(f'input tapes differ in {name}')
     reference, actual = (np.array([[row[name] for name in LOSS_FIELDS] for row in source], dtype=np.float64)
                          for source in (torch, paddle))
     delta = actual - reference
