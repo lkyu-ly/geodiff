@@ -62,21 +62,24 @@ def first_val_graph(path, config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkpoint', type=Path, required=True)
-    parser.add_argument('--val', type=Path, required=True)
+    parser.add_argument('--val', type=Path, help='validation pickle (requires --val-graph)')
     parser.add_argument('--forward', type=Path, required=True, help='new fixed-forward archive')
-    parser.add_argument('--val-graph', type=Path, required=True, help='new validation graph archive')
+    parser.add_argument('--val-graph', type=Path, help='new validation graph archive (requires --val)')
     args = parser.parse_args()
-    if args.forward.resolve() == args.val_graph.resolve():
+    if (args.val is None) != (args.val_graph is None):
+        parser.error('--val and --val-graph must be supplied together')
+    if args.val_graph is not None and args.forward.resolve() == args.val_graph.resolve():
         parser.error('Specify two different output paths')
     for path in (args.forward, args.val_graph):
-        if path.exists():
+        if path is not None and path.exists():
             parser.error(f'Output already exists: {path}')
 
     sys.path.insert(0, str(TORCH_ROOT))
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    forward = fixed_forward(checkpoint)
-    val = first_val_graph(args.val, checkpoint['config'].model)
-    for path, arrays in ((args.forward, forward), (args.val_graph, val)):
+    outputs = [(args.forward, fixed_forward(checkpoint))]
+    if args.val_graph is not None:
+        outputs.append((args.val_graph, first_val_graph(args.val, checkpoint['config'].model)))
+    for path, arrays in outputs:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('xb') as file:
             np.savez(file, **arrays)

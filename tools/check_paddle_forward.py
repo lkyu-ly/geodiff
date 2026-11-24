@@ -22,12 +22,20 @@ INPUTS = ('atom_type', 'pos', 'bond_index', 'bond_type', 'batch')
 OUTPUTS = ('edge_inv_global', 'edge_inv_local', 'edge_index', 'edge_type', 'edge_length', 'local_edge_mask')
 
 
+def error_metrics(actual, expected):
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    error = np.abs(actual - expected)
+    denominator = np.maximum(np.maximum(np.abs(actual), np.abs(expected)), 1e-30)
+    return {'max_abs': error.max(), 'mean_abs': error.mean(), 'mean_rel': (error / denominator).mean()}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--forward', type=Path, required=True)
     parser.add_argument('--weights', type=Path, required=True, help='native Paddle .pdparams')
-    parser.add_argument('--val-graph', type=Path, required=True)
-    parser.add_argument('--train', type=Path, required=True)
+    parser.add_argument('--val-graph', type=Path, help='also check the first official validation graph')
+    parser.add_argument('--train', type=Path, help='also check loss and backward on these training graphs')
     parser.add_argument('--device', default='gpu:0')
     args = parser.parse_args()
     paddle.set_device(args.device)
@@ -54,21 +62,25 @@ def main():
             assert value.shape == expected.shape and value.dtype == expected.dtype, key
             if key in ('edge_inv_global', 'edge_inv_local', 'edge_length'):
                 np.testing.assert_allclose(value, expected, atol=1e-5, rtol=1e-4, err_msg=key)
-                error = np.abs(value - expected)
-                print(f'{key} {value.shape}: max_abs={error.max():.8g} mean_abs={error.mean():.8g}')
+                metrics = ' '.join(f'{name}={score:.8g}' for name, score in error_metrics(value, expected).items())
+                print(f'{key} {value.shape}: {metrics}')
             else:
                 np.testing.assert_array_equal(value, expected, err_msg=key)
                 print(f'{key} {value.shape}: exact')
 
-    with np.load(args.val_graph, allow_pickle=False) as ref:
-        pos, bond_index, bond_type, batch = (paddle.to_tensor(ref[key]) for key in INPUTS[1:])
-        edge_index, edge_type = extend_graph_order_radius(
-            pos.shape[0], pos, bond_index, bond_type, batch, order=config.edge_order, cutoff=config.cutoff
-        )
-        assert edge_index.shape == [2, 306] and edge_type.shape == [306]
-        np.testing.assert_array_equal(edge_index.numpy(), ref['edge_index'])
-        np.testing.assert_array_equal(edge_type.numpy(), ref['edge_type'])
-        print(f'First official val graph: {pos.shape[0]} nodes, 306 edges and types exact')
+    if args.val_graph is not None:
+        with np.load(args.val_graph, allow_pickle=False) as ref:
+            pos, bond_index, bond_type, batch = (paddle.to_tensor(ref[key]) for key in INPUTS[1:])
+            edge_index, edge_type = extend_graph_order_radius(
+                pos.shape[0], pos, bond_index, bond_type, batch, order=config.edge_order, cutoff=config.cutoff
+            )
+            assert edge_index.shape == [2, 306] and edge_type.shape == [306]
+            np.testing.assert_array_equal(edge_index.numpy(), ref['edge_index'])
+            np.testing.assert_array_equal(edge_type.numpy(), ref['edge_type'])
+            print(f'First official val graph: {pos.shape[0]} nodes, 306 edges and types exact')
+
+    if args.train is None:
+        return
 
     # A fresh model keeps eval-time embedding renormalization out of the loss check.
     model = get_model(config)
