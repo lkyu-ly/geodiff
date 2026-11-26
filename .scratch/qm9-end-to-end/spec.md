@@ -1,6 +1,6 @@
 # GeoDiff QM9：固定前向与 20 步训练对齐
 
-Status: ready-for-agent
+Status: resolved
 
 ## 目标
 

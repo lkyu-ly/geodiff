@@ -113,6 +113,71 @@ python tools/compare_l1_alignment.py \
 Edges, edge types and the local mask must be exactly equal. Losses, both scalars and gradients pass at `atol=1e-4, rtol=1e-3`; the relative error is reported over all entries and over those above `atol`. Both sides must record without a gradient exactly the five `edge_encoder_local.*` tensors, which the forward never calls. The command exits non-zero on any failure.
 
 
+## Compare fixed-input forward and 20 training updates
+
+Run from the repository root in the Torch environment. Choose a fresh `run` directory and point `step` at the saved first training batch:
+
+```bash
+run=runs/qm9-end-to-end/replay
+step=runs/torch_qm9_smoke/qm9_smoke_2026_11_23__20_27_55_resume/inputs/2865000.npz
+```
+
+If the recording was cleaned up, capture a new one from the released checkpoint and official QM9 splits. This runs one Torch update and one validation batch. Both sides will replay the new recording; it does not replace the historical file.
+
+```bash
+mkdir -p "$run"
+capture=$(mktemp -d "$run/torch-capture.XXXXXX")
+mkdir -p "$capture/resume/checkpoints"
+ln -s "$PWD/checkpoints/qm9_default.pt" "$capture/resume/checkpoints/2865000.pt"
+python - "$capture/resume/qm9.yml" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+config = yaml.safe_load(Path('geodiff/configs/qm9_default.yml').read_text())
+config['train']['max_iters'] = 2865000
+config['dataset'].update(train='data/QM9/train_data_40k.pkl',
+                         val='data/QM9/val_data_5k.pkl')
+Path(sys.argv[1]).write_text(yaml.safe_dump(config, sort_keys=False))
+PY
+python geodiff/train.py "$capture/resume" --device cuda:0 --resume_iter 2865000 \
+  --record_inputs --trust_checkpoint --val_batches 1 --logdir "$capture/results"
+step=$(find "$capture/results" -type f -path '*/inputs/2865000.npz' -print -quit)
+test -s "$step"
+```
+
+Generate the fixed-forward reference and run the Torch training replay:
+
+```bash
+python tools/export_qm9_references.py \
+  --checkpoint checkpoints/qm9_default.pt --forward "$run/forward.npz"
+python tools/run_qm9_training_parity.py prepare \
+  --inputs "$step" --out "$run/train_inputs.npz"
+python tools/run_qm9_training_parity.py torch \
+  --checkpoint checkpoints/qm9_default.pt --inputs "$run/train_inputs.npz" \
+  --out "$run/train_torch.json"
+```
+
+In the Torch-free Paddle environment, with `run` pointing to the same directory:
+
+```bash
+run=runs/qm9-end-to-end/replay
+PYTHONPATH=geodiff_paddle python tools/check_paddle_forward.py \
+  --forward "$run/forward.npz" --weights runs/paddle_qm9/qm9_default.pdparams
+python tools/run_qm9_training_parity.py paddle \
+  --weights runs/paddle_qm9/qm9_default.pdparams --inputs "$run/train_inputs.npz" \
+  --out "$run/train_paddle.json"
+python tools/run_qm9_training_parity.py compare \
+  --torch "$run/train_torch.json" --paddle "$run/train_paddle.json" \
+  --out "$run/train_comparison.json"
+```
+
+The forward check compares graph indices, types and masks exactly, and checks edge lengths and both scores with `atol=1e-5, rtol=1e-4`. Training reuses the recorded batch of 64 conformations. Both frameworks use its original first-step noise and the same 19 further timestep/noise pairs prepared with NumPy seed 2021. Each starts from the released weights with two new Adam optimizers at the QM9 learning rate, with no validation or scheduler updates during the replay.
+
+Each training command writes its step JSON and an adjacent `.json.inputs.npz` containing the inputs it consumed. Keep each pair together; comparison requires the expected backend labels and identical input arrays.
+
+The comparison reports absolute and relative errors for total, global and local loss. Relative error uses `max(abs(Torch), abs(Paddle), 1e-30)` as denominator. The training verdict checks whether the total-loss differences `Paddle − Torch` include both signs. The report is written even if this criterion fails.
+
 ## Run one training update and resume
 
 In the Paddle environment, make a two-graph batch config and run one update followed by validation:

@@ -3,3 +3,7 @@ paconvert.log
 unsupport_api_map.xlsx
 data/*
 checkpoints/*
+/geodiff_qm9_default.zip
+/geodiff_qm9_data.zip
+/geodiff_drugs_default.zip
+/geodiff_drugs_data.zip
